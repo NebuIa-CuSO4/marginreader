@@ -1,0 +1,77 @@
+{
+  "name": "margin-reader",
+  "version": "0.1.27",
+  "private": true,
+  "description": "页边 Margin — Windows 阅读伴读侧栏",
+  "main": "./out/main/index.js",
+  "author": "Margin",
+  "license": "MIT",
+  "scripts": {
+    "dev": "electron-vite dev",
+    "build": "electron-vite build",
+    "start": "electron-vite preview",
+    "typecheck": "tsc --noEmit -p tsconfig.node.json && tsc --noEmit -p tsconfig.web.json",
+    "dist": "npm run build && electron-builder --win nsis"
+  },
+  "dependencies": {
+    "katex": "^0.16.25",
+    "lucide-react": "^0.468.0",
+    "react": "^19.3.1",
+    "react-dom": "^19.3.1",
+    "react-markdown": "^10.1.0",
+    "rehype-katex": "^7.0.1",
+    "remark-gfm": "^4.0.1",
+    "remark-math": "^6.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "@types/react": "^19.0.0",
+    "@types/react-dom": "^19.0.0",
+    "@vitejs/plugin-react": "^6.1.2",
+    "electron": "^45.2.1",
+    "electron-builder": "^26.18.0",
+    "electron-vite": "^6.0.0",
+    "playwright-core": "^1.64.1",
+    "typescript": "^5.9.3",
+    "vite": "^8.3.5"
+  },
+  "build": {
+    "appId": "com.margin.reader",
+    "productName": "页边 Margin",
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "out/**/*",
+      "package.json"
+    ],
+    "extraResources": [
+      {
+        "from": "resources/ocr.ps1",
+        "to": "ocr.ps1"
+      },
+      {
+        "from": "resources/copy-selection.ps1",
+        "to": "copy-selection.ps1"
+      },
+      {
+        "from": "resources/read-selection.ps1",
+        "to": "read-selection.ps1"
+      },
+      {
+        "from": "resources/icon.png",
+        "to": "icon.png"
+      }
+    ],
+    "win": {
+      "target": "nsis",
+      "icon": "resources/icon.ico",
+      "artifactName": "Margin-${version}-Setup.${ext}"
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true
+    }
+  }
+}

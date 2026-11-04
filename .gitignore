@@ -1,0 +1,14 @@
+node_modules/
+out/
+release/
+*.log
+margin-smoke.png
+margin-debug.log
+e-out.log
+e-err.log
+e2-out.log
+e2-err.log
+electron-out.log
+electron-err.log
+electron-default-out.log
+electron-default-err.log
