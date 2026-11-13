@@ -1,4 +1,4 @@
-import { BrowserWindow, ipcMain, screen, shell } from 'electron'
+import { BrowserWindow, ipcMain, net, screen, shell } from 'electron'
 import { randomUUID } from 'node:crypto'
 import type { LastAssistantAnswer } from '../shared/api'
 import type { ConversationBinding, DeepSeekStatus, StreamEvent } from '../shared/types'
@@ -159,6 +159,26 @@ export class DeepSeekBridge {
 
   async showWindow(): Promise<void> {
     const win = await this.ensureWindow()
+    if (!net.isOnline()) {
+      this.lastState = {
+        ...this.lastState,
+        phase: 'offline',
+        composerReady: false,
+        loginRequired: false,
+        message: '网络未连接，请检查网络后点击“重连”。'
+      }
+      this.emit({ type: 'state', state: this.lastState })
+    }
+    if (
+      net.isOnline() &&
+      (this.lastState.phase === 'error' || !this.lastState.composerReady)
+    ) {
+      const current = win.webContents.getURL()
+      const target = current.startsWith('http') ? current : BASE_URL
+      await this.loadUrl(target, 15_000).catch(() => undefined)
+      await new Promise((resolve) => setTimeout(resolve, 700))
+      await this.refreshState().catch(() => undefined)
+    }
     win.setIgnoreMouseEvents(false)
     win.setOpacity(1)
     win.setSkipTaskbar(false)
@@ -178,6 +198,16 @@ export class DeepSeekBridge {
   }
 
   async getStatus(): Promise<DeepSeekStatus> {
+    if (!net.isOnline()) {
+      this.lastState = {
+        ...this.lastState,
+        phase: 'offline',
+        composerReady: false,
+        loginRequired: false,
+        message: '网络未连接，请检查网络后点击“重连”。'
+      }
+      return this.lastState
+    }
     if (!this.win || this.win.isDestroyed()) {
       return {
         ...this.lastState,
@@ -274,6 +304,9 @@ export class DeepSeekBridge {
     createIfMissing: boolean,
     options: SendOptions = {}
   ): Promise<ConversationBinding | null> {
+    if (!net.isOnline()) {
+      throw new BridgeError('NETWORK_OFFLINE', '网络未连接，请检查网络后点击“重连”。')
+    }
     const win = await this.ensureWindow()
     let binding = this.db.getBinding(projectId)
 
@@ -417,6 +450,24 @@ export class DeepSeekBridge {
       text: result?.text ?? '',
       reasoning: result?.reasoning ?? ''
     }
+  }
+
+  async reconnect(projectId?: string): Promise<DeepSeekStatus> {
+    if (!net.isOnline()) {
+      return this.refreshState()
+    }
+    const win = await this.ensureWindow()
+    const binding = projectId ? this.db.getBinding(projectId) : null
+    const target =
+      binding?.url ||
+      (win.webContents.getURL().startsWith('http') ? win.webContents.getURL() : BASE_URL)
+    try {
+      await this.loadUrl(target, 20_000)
+      await new Promise((resolve) => setTimeout(resolve, 1000))
+    } catch {
+      // getStatus below turns this into a visible error state.
+    }
+    return this.refreshState()
   }
 
   async refreshState(): Promise<DeepSeekStatus> {

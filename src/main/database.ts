@@ -406,6 +406,50 @@ export class AppDatabase {
       .run(content, reasoning, status, id)
   }
 
+  deleteMessage(id: string): void {
+    this.db.prepare('DELETE FROM messages WHERE id = ?').run(id)
+  }
+
+  /**
+   * Older versions persisted a local user/assistant pair even when the web page
+   * was offline or had no composer. Those messages were never sent to DeepSeek;
+   * remove only the known pre-send failures, not genuine read/send failures.
+   */
+  deleteUnsentFailures(): number {
+    const rows = this.db
+      .prepare(
+        `SELECT id, project_id, role, content, status, created_at
+         FROM messages ORDER BY project_id ASC, created_at ASC, id ASC`
+      )
+      .all() as unknown as Array<Record<string, unknown>>
+    const patterns = [
+      /找不到 DeepSeek 输入框/,
+      /网页里没有找到输入框/,
+      /网络未连接/,
+      /当前网页对话与项目绑定的对话不一致/
+    ]
+    const remove = new Set<string>()
+    for (let index = 0; index < rows.length; index += 1) {
+      const row = rows[index]
+      if (String(row.role) !== 'assistant' || String(row.status) !== 'error') continue
+      const content = String(row.content ?? '')
+      if (!patterns.some((pattern) => pattern.test(content))) continue
+      remove.add(String(row.id))
+      const previous = rows[index - 1]
+      if (
+        previous &&
+        String(previous.role) === 'user' &&
+        String(previous.project_id) === String(row.project_id)
+      ) {
+        remove.add(String(previous.id))
+      }
+    }
+    if (remove.size === 0) return 0
+    const statement = this.db.prepare('DELETE FROM messages WHERE id = ?')
+    for (const id of remove) statement.run(id)
+    return remove.size
+  }
+
   clearMessages(projectId: string): void {
     this.db.prepare('DELETE FROM messages WHERE project_id = ?').run(projectId)
   }

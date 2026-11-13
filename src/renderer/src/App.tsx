@@ -10,6 +10,7 @@ import {
   PanelRightClose,
   Pin,
   PinOff,
+  RefreshCw,
   Settings,
   StickyNote
 } from 'lucide-react'
@@ -65,6 +66,7 @@ interface PendingImage {
 
 function statusLabel(status: DeepSeekStatus, binding: ConversationBinding | null): string {
   if (status.phase === 'loading') return '连接中'
+  if (status.phase === 'offline') return '网络未连接'
   if (status.phase === 'login_required') return '需登录'
   if (status.phase === 'error') return '连接异常'
   if (status.phase === 'ready') return binding?.status === 'connected' ? '已连接' : '未绑定对话'
@@ -73,7 +75,7 @@ function statusLabel(status: DeepSeekStatus, binding: ConversationBinding | null
 
 function statusClass(status: DeepSeekStatus, binding: ConversationBinding | null): string {
   if (status.phase === 'ready' && binding?.status === 'connected') return 'connected'
-  if (status.phase === 'login_required') return 'warning'
+  if (status.phase === 'offline' || status.phase === 'login_required') return 'warning'
   if (status.phase === 'error') return 'error'
   if (status.phase === 'loading') return 'loading'
   return 'idle'
@@ -103,6 +105,7 @@ export default function App(): React.JSX.Element {
   } | null>(null)
   const [settings, setSettings] = useState<SettingsType | null>(null)
   const [status, setStatus] = useState<DeepSeekStatus>(EMPTY_STATUS)
+  const [reconnecting, setReconnecting] = useState(false)
   const [readIssue, setReadIssue] = useState(false)
   const [windowState, setWindowState] = useState<WindowState>({
     collapsed: false,
@@ -409,15 +412,39 @@ export default function App(): React.JSX.Element {
         imageDataUrl
       })
       if (!result.ok) {
-        setMessages((previous) =>
-          previous.map((message) => {
-            if (message.id === userId) return { ...message, status: 'error' }
-            if (message.id === assistantId) {
-              return { ...message, status: 'error', content: result.error ?? '发送失败' }
-            }
-            return message
-          })
-        )
+        const neverSent = new Set([
+          'NETWORK_OFFLINE',
+          'COMPOSER_NOT_FOUND',
+          'LOGIN_REQUIRED',
+          'URL_MISMATCH',
+          'NO_BINDING',
+          'BINDING_INVALID',
+          'INVALID_URL'
+        ])
+        if (result.code && neverSent.has(result.code)) {
+          setMessages((previous) =>
+            previous.filter((message) => message.id !== userId && message.id !== assistantId)
+          )
+          setComposer((current) => current || text)
+          if (result.code === 'NETWORK_OFFLINE') {
+            setStatus((previous) => ({
+              ...previous,
+              phase: 'offline',
+              composerReady: false,
+              message: '网络未连接，请检查网络后点击“重连”。'
+            }))
+          }
+        } else {
+          setMessages((previous) =>
+            previous.map((message) => {
+              if (message.id === userId) return { ...message, status: 'error' }
+              if (message.id === assistantId) {
+                return { ...message, status: 'error', content: result.error ?? '发送失败' }
+              }
+              return message
+            })
+          )
+        }
         setSending(false)
         sendingRef.current = false
         showToast(result.error ?? '发送失败', 'error')
@@ -523,6 +550,26 @@ export default function App(): React.JSX.Element {
       setMessagesHasMore(page.hasMore)
     } finally {
       setLoadingOlder(false)
+    }
+  }
+
+  async function reconnectDeepSeek(): Promise<void> {
+    if (reconnecting) return
+    setReconnecting(true)
+    try {
+      const next = await window.margin.deepseek.reconnect(activeIdRef.current)
+      setStatus(next)
+      if (next.phase === 'ready') {
+        showToast('DeepSeek 已重新连接')
+      } else if (next.phase === 'offline') {
+        showToast('网络仍未连接，请检查网络', 'error')
+      } else {
+        showToast(next.message || '重新连接失败', 'error')
+      }
+    } catch (error) {
+      showToast(error instanceof Error ? error.message : String(error), 'error')
+    } finally {
+      setReconnecting(false)
     }
   }
 
@@ -810,6 +857,17 @@ export default function App(): React.JSX.Element {
           <span className="status-dot" />
           {currentStatusLabel}
         </button>
+        {(status.phase === 'offline' || status.phase === 'error' || readIssue) && (
+          <button
+            className="reconnect-button"
+            title="重新连接 DeepSeek"
+            disabled={reconnecting}
+            onClick={() => void reconnectDeepSeek()}
+          >
+            <RefreshCw size={13} className={reconnecting ? 'spin' : ''} />
+            {reconnecting ? '重连中' : '重连'}
+          </button>
+        )}
         <button className="icon-button small" title="打开 DeepSeek 网页" onClick={() => void window.margin.deepseek.show()}>
           <ExternalLink size={14} />
         </button>

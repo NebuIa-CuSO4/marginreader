@@ -82,6 +82,7 @@ export interface MarginApi {
   }
   deepseek: {
     status: () => Promise<DeepSeekStatus>
+    reconnect: (projectId?: string) => Promise<DeepSeekStatus>
     show: () => Promise<void>
     hide: () => Promise<void>
     bindCurrent: (projectId: string) => Promise<ConversationBinding>

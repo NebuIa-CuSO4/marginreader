@@ -122,7 +122,7 @@ export interface Settings {
 }
 
 export interface DeepSeekStatus {
-  phase: 'not_started' | 'loading' | 'login_required' | 'ready' | 'error'
+  phase: 'not_started' | 'loading' | 'login_required' | 'ready' | 'offline' | 'error'
   url: string
   externalId: string | null
   loginRequired: boolean

@@ -1161,6 +1161,13 @@ async function sendMessage(cmd: Command): Promise<void> {
     respond(cmd.id, false, undefined, { code: 'EMPTY_MESSAGE', message: '消息为空。' })
     return
   }
+  if (!navigator.onLine) {
+    respond(cmd.id, false, undefined, {
+      code: 'NETWORK_OFFLINE',
+      message: '网络未连接，请检查网络后点击“重连”再发送。'
+    })
+    return
+  }
   const composer = findComposer()
   if (!composer) {
     respond(cmd.id, false, undefined, {

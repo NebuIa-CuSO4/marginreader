@@ -67,6 +67,8 @@ const api: MarginApi = {
   },
   deepseek: {
     status: () => ipcRenderer.invoke('deepseek:status') as Promise<DeepSeekStatus>,
+    reconnect: (projectId) =>
+      ipcRenderer.invoke('deepseek:reconnect', projectId) as Promise<DeepSeekStatus>,
     show: () => ipcRenderer.invoke('deepseek:show') as Promise<void>,
     hide: () => ipcRenderer.invoke('deepseek:hide') as Promise<void>,
     bindCurrent: (projectId) =>

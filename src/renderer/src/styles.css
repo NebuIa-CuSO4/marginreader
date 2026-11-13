@@ -2288,3 +2288,28 @@ button:disabled {
   justify-content: center;
   font-size: 10.5px;
 }
+
+/* Reconnect after network loss / DeepSeek page failure */
+.reconnect-button {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 3px;
+  height: 27px;
+  padding: 0 7px;
+  border-radius: 7px;
+  color: var(--danger);
+  background: var(--danger-soft);
+  font-size: 9.5px;
+  font-weight: 600;
+}
+
+.reconnect-button:hover {
+  color: var(--surface);
+  background: var(--danger);
+}
+
+.reconnect-button:disabled {
+  opacity: 0.6;
+}

@@ -6,6 +6,7 @@ import {
   ipcMain,
   Menu,
   nativeImage,
+  net,
   Tray
 } from 'electron'
 import fs from 'node:fs/promises'
@@ -259,6 +260,13 @@ function registerIpc(): void {
     if (!db.getProject(input.projectId)) {
       return { ok: false, code: 'NO_PROJECT', error: '项目不存在。' }
     }
+    if (!net.isOnline()) {
+      return {
+        ok: false,
+        code: 'NETWORK_OFFLINE',
+        error: '网络未连接，请检查网络后点击“重连”再发送。'
+      }
+    }
     const assistantId = input.assistantId || randomUUID()
     const displayText = input.displayText?.trim() || text
     const userMessage: ChatMessage = {
@@ -304,8 +312,22 @@ function registerIpc(): void {
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error)
       const code = error instanceof BridgeError ? error.code : 'SEND_FAILED'
-      db.updateMessage(userMessage.id, displayText, 'error')
-      db.updateMessage(assistantId, message, 'error')
+      const neverSent = new Set([
+        'NETWORK_OFFLINE',
+        'COMPOSER_NOT_FOUND',
+        'LOGIN_REQUIRED',
+        'URL_MISMATCH',
+        'NO_BINDING',
+        'BINDING_INVALID',
+        'INVALID_URL'
+      ])
+      if (neverSent.has(code)) {
+        db.deleteMessage(userMessage.id)
+        db.deleteMessage(assistantId)
+      } else {
+        db.updateMessage(userMessage.id, displayText, 'error')
+        db.updateMessage(assistantId, message, 'error')
+      }
       sendToRenderer('chat:stream', {
         projectId: input.projectId,
         assistantId,
@@ -321,6 +343,11 @@ function registerIpc(): void {
   })
 
   ipcMain.handle('deepseek:status', () => bridge.getStatus())
+  ipcMain.handle('deepseek:reconnect', async (_event, projectId?: string) => {
+    const state = await bridge.reconnect(projectId)
+    sendToRenderer('deepseek:status-changed', state)
+    return state
+  })
   ipcMain.handle('deepseek:show', () => bridge.showWindow())
   ipcMain.handle('deepseek:hide', () => bridge.hideWindow())
   ipcMain.handle('deepseek:bind-current', async (_event, projectId: string) => {
@@ -413,6 +440,8 @@ async function bootstrap(): Promise<void> {
   debug(`db path ${getDatabasePath()}`)
   db = new AppDatabase(getDatabasePath())
   db.markStreamingInterrupted()
+  const removedUnsent = db.deleteUnsentFailures()
+  if (removedUnsent > 0) debug(`removed ${removedUnsent} pre-send failure messages`)
   const settings = db.getSettings()
   applyLaunchAtLogin(settings.launchAtLogin)
   debug('db ready')
