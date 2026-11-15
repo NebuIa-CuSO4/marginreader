@@ -144,6 +144,11 @@ function MarkdownBase({ content }: { content: string }): React.JSX.Element {
         ]}
         components={{
           pre: ({ children }) => <CodeBlock>{children}</CodeBlock>,
+          table: ({ children }) => (
+            <div className="table-wrap">
+              <table>{children}</table>
+            </div>
+          ),
           a: ({ href, children }) => (
             <a href={href} target="_blank" rel="noreferrer noopener">
               {children}

@@ -283,6 +283,32 @@ const BLOCK_TAGS = new Set([
   'ul'
 ])
 
+function tableToMarkdown(table: HTMLTableElement): string {
+  const rows = Array.from(table.rows)
+    .map((row) =>
+      Array.from(row.cells).map((cell) =>
+        extractTextWithMath(cell)
+          .replace(/\r?\n/g, ' ')
+          .replace(/\|/g, '\\|')
+          .replace(/\s+/g, ' ')
+          .trim()
+      )
+    )
+    .filter((row) => row.length > 0)
+  if (rows.length === 0) return ''
+  const width = Math.max(...rows.map((row) => row.length))
+  const normalized = rows.map((row) => [
+    ...row,
+    ...Array.from({ length: Math.max(0, width - row.length) }, () => '')
+  ])
+  const header = normalized[0]
+  const separator = header.map(() => '---')
+  const body = normalized.slice(1)
+  return `\n\n| ${header.join(' | ')} |\n| ${separator.join(' | ')} |\n${body
+    .map((row) => `| ${row.join(' | ')} |`)
+    .join('\n')}\n\n`
+}
+
 /**
  * DeepSeek renders formulas with KaTeX. innerText exposes the hidden MathML
  * accessibility tree (𝑢, 𝑚, 𝜆 ...), which looks like garbled Unicode. Rebuild
@@ -357,6 +383,10 @@ function extractTextWithMath(root: Node, skip?: Set<Element>): string {
           return
         }
       }
+    }
+    if (tag === 'table') {
+      append(tableToMarkdown(node as HTMLTableElement))
+      return
     }
     if (tag === 'pre') {
       append(`\n\`\`\`\n${node.textContent ?? ''}\n\`\`\`\n`)
@@ -574,7 +604,7 @@ function assistantBlocks(): HTMLElement[] {
   const root = findChatRoot() ?? document
   const all: HTMLElement[] = Array.from(
     root.querySelectorAll<HTMLElement>(
-      '.ds-markdown, [class*="ds-markdown"], [class*="markdown"], pre, code, [class*="code-block"], [class*="codeblock"], [class*="highlight"]'
+      '.ds-markdown, [class*="ds-markdown"], [class*="markdown"], table, pre, code, [class*="code-block"], [class*="codeblock"], [class*="highlight"]'
     )
   ).filter(
     (el): el is HTMLElement =>
