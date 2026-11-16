@@ -54,6 +54,14 @@ export class DeepSeekBridge {
   private quitting = false
   private loading = false
   private stateRefreshTimer: NodeJS.Timeout | null = null
+  private excerptWaiters = new Map<
+    string,
+    {
+      resolve: (text: string) => void
+      reject: (error: Error) => void
+      timer: NodeJS.Timeout
+    }
+  >()
 
   constructor(
     private readonly db: AppDatabase,
@@ -295,6 +303,30 @@ export class DeepSeekBridge {
     const win = await this.ensureWindow()
     const url = win.webContents.getURL()
     return this.bindUrl(projectId, url)
+  }
+
+  async excerpt(projectId: string, prompt: string, imageDataUrl = ''): Promise<string> {
+    const assistantId = `excerpt-${randomUUID()}`
+    const result = new Promise<string>((resolve, reject) => {
+      const timer = setTimeout(() => {
+        this.excerptWaiters.delete(assistantId)
+        reject(new BridgeError('EXCERPT_TIMEOUT', '摘抄等待 DeepSeek 回答超时，请稍后重试。'))
+      }, 185_000)
+      this.excerptWaiters.set(assistantId, { resolve, reject, timer })
+    })
+    try {
+      await this.send(projectId, prompt, assistantId, true, {
+        imageDataUrl,
+        fallbackText: prompt
+      })
+      return await result
+    } finally {
+      const waiter = this.excerptWaiters.get(assistantId)
+      if (waiter) {
+        clearTimeout(waiter.timer)
+        this.excerptWaiters.delete(assistantId)
+      }
+    }
   }
 
   async send(
@@ -553,6 +585,19 @@ export class DeepSeekBridge {
 
   private onStream = (_event: Electron.IpcMainEvent, payload: StreamPayload): void => {
     const { requestId: _requestId, ...event } = payload
+    const waiter = this.excerptWaiters.get(event.assistantId)
+    if (waiter) {
+      if (event.phase === 'done') {
+        clearTimeout(waiter.timer)
+        this.excerptWaiters.delete(event.assistantId)
+        waiter.resolve(event.text ?? '')
+      } else if (event.phase === 'error') {
+        clearTimeout(waiter.timer)
+        this.excerptWaiters.delete(event.assistantId)
+        waiter.reject(new BridgeError('EXCERPT_FAILED', event.error ?? '摘抄失败。'))
+      }
+      return
+    }
     this.emit({ type: 'stream', event })
   }
 

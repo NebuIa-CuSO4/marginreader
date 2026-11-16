@@ -52,6 +52,17 @@ export interface SendMessageInput {
   imageDataUrl?: string
 }
 
+export interface ExcerptInput {
+  projectId: string
+  text?: string
+  imageDataUrl?: string
+}
+
+export interface ExcerptResult {
+  note: Note
+  exact: boolean | null
+}
+
 export interface MarginApi {
   app: {
     bootstrap: () => Promise<BootstrapData>
@@ -63,6 +74,9 @@ export interface MarginApi {
     exportData: () => Promise<string | null>
     saveTextFile: (input: { fileName: string; content: string }) => Promise<string | null>
     copyText: (text: string) => Promise<void>
+  }
+  excerpt: {
+    run: (input: ExcerptInput) => Promise<ExcerptResult>
   }
   window: {
     getState: () => Promise<WindowState>

@@ -115,7 +115,7 @@ export class SelectionService {
     if (this.toolbar && !this.toolbar.isDestroyed()) this.toolbar.destroy()
     const cursor = screen.getCursorScreenPoint()
     const area = screen.getDisplayNearestPoint(cursor).workArea
-    const width = 302
+    const width = 380
     const height = 54
     const x = Math.max(area.x + 8, Math.min(cursor.x + 12, area.x + area.width - width - 8))
     const y = Math.max(area.y + 8, Math.min(cursor.y + 18, area.y + area.height - height - 8))

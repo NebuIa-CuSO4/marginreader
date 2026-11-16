@@ -2334,3 +2334,26 @@ button:disabled {
 .reconnect-button:disabled {
   opacity: 0.6;
 }
+
+/* Screenshot action chooser */
+.capture-choice-preview {
+  max-height: 320px;
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  background: var(--surface-2);
+}
+
+.capture-choice-preview img {
+  display: block;
+  width: 100%;
+  max-height: 320px;
+  object-fit: contain;
+}
+
+.capture-choice-meta {
+  margin-top: 6px;
+  color: var(--faint);
+  font-size: 10px;
+  text-align: right;
+}

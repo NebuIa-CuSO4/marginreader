@@ -161,7 +161,7 @@ export interface CaptureResult {
   error?: string
 }
 
-export type SelectionActionKind = 'translate' | 'explain' | 'save'
+export type SelectionActionKind = 'translate' | 'explain' | 'save' | 'excerpt'
 
 export interface SelectionAction {
   action: SelectionActionKind

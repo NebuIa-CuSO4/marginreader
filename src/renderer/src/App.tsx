@@ -6,13 +6,16 @@ import {
   ChevronUp,
   ExternalLink,
   Languages,
+  Loader2,
   MessageSquare,
+  NotebookPen,
   PanelRightClose,
   Pin,
   PinOff,
   RefreshCw,
   Settings,
-  StickyNote
+  StickyNote,
+  Upload
 } from 'lucide-react'
 import type {
   BootstrapData,
@@ -122,6 +125,9 @@ export default function App(): React.JSX.Element {
   const [noteView, setNoteView] = useState<Note | null>(null)
   const [vocabDraft, setVocabDraft] = useState<{ initial?: Partial<Vocab> } | null>(null)
   const [pendingImage, setPendingImage] = useState<PendingImage | null>(null)
+  const [captureChoice, setCaptureChoice] = useState<PendingImage | null>(null)
+  const [excerpting, setExcerpting] = useState(false)
+  const excerptingRef = useRef(false)
   const [confirmCreate, setConfirmCreate] = useState<{ text: string; imageDataUrl?: string } | null>(
     null
   )
@@ -272,22 +278,12 @@ export default function App(): React.JSX.Element {
         return
       }
       if (result.imageDataUrl) {
-        setPendingImage({
+        setCaptureChoice({
           dataUrl: result.imageDataUrl,
           width: result.width,
           height: result.height
         })
-        pendingImageRef.current = {
-          dataUrl: result.imageDataUrl,
-          width: result.width,
-          height: result.height
-        }
         setTab('chat')
-        showToast('截图已附加，输入问题后发送。')
-        window.setTimeout(
-          () => document.querySelector<HTMLTextAreaElement>('.composer textarea')?.focus(),
-          80
-        )
         return
       }
       if (result.text.trim()) {
@@ -316,6 +312,10 @@ export default function App(): React.JSX.Element {
     })
 
     const offSelection = window.margin.selection.onAction((action) => {
+      if (action.action === 'excerpt') {
+        void runExcerpt({ text: action.text })
+        return
+      }
       if (action.action === 'save') {
         setTab('vocab')
         setVocabDraft({
@@ -553,6 +553,33 @@ export default function App(): React.JSX.Element {
     }
   }
 
+  async function runExcerpt(input: { text?: string; imageDataUrl?: string }): Promise<void> {
+    if (excerptingRef.current) return
+    excerptingRef.current = true
+    setExcerpting(true)
+    void window.margin.window.expand(true)
+    showToast('正在让 DeepSeek 逐字整理摘抄…')
+    try {
+      const result = await window.margin.excerpt.run({
+        projectId: activeIdRef.current,
+        ...input
+      })
+      setNotes((previous) => [result.note, ...previous.filter((note) => note.id !== result.note.id)])
+      setNoteView(result.note)
+      setTab('notes')
+      showToast(
+        result.exact === false
+          ? '模型返回内容有改动，已自动改用原文并保存。'
+          : '摘抄已保存为笔记'
+      )
+    } catch (error) {
+      showToast(error instanceof Error ? error.message : String(error), 'error')
+    } finally {
+      excerptingRef.current = false
+      setExcerpting(false)
+    }
+  }
+
   async function reconnectDeepSeek(): Promise<void> {
     if (reconnecting) return
     setReconnecting(true)
@@ -750,7 +777,17 @@ export default function App(): React.JSX.Element {
 
   function scheduleAutoHide(): void {
     if (!settingsRef.current?.autoHide || settingsRef.current.pinned) return
-    if (projectsOpen || settingsOpen || noteDraft || vocabDraft || confirmCreate) return
+    if (
+      projectsOpen ||
+      settingsOpen ||
+      noteDraft ||
+      vocabDraft ||
+      confirmCreate ||
+      captureChoice ||
+      noteView
+    ) {
+      return
+    }
     const active = document.activeElement
     if (
       active instanceof HTMLTextAreaElement ||
@@ -1118,6 +1155,56 @@ export default function App(): React.JSX.Element {
           onExport={exportData}
           onClose={() => setSettingsOpen(false)}
         />
+      )}
+      {captureChoice && (
+        <Modal
+          title="截图已截取"
+          subtitle="选择“摘抄”让 DeepSeek 逐字整理成笔记，或先上传到会话再自己提问。"
+          onClose={() => setCaptureChoice(null)}
+        >
+          <div className="capture-choice-preview">
+            <img src={captureChoice.dataUrl} alt="截取的区域" />
+          </div>
+          <div className="capture-choice-meta">
+            {captureChoice.width} × {captureChoice.height}
+          </div>
+          <div className="modal-actions">
+            <button className="ghost-button" onClick={() => setCaptureChoice(null)}>
+              取消
+            </button>
+            <button
+              className="ghost-button"
+              disabled={excerpting}
+              onClick={() => {
+                const image = captureChoice
+                setCaptureChoice(null)
+                setPendingImage(image)
+                pendingImageRef.current = image
+                setTab('chat')
+                showToast('截图已附加，输入问题后发送。')
+                window.setTimeout(
+                  () => document.querySelector<HTMLTextAreaElement>('.composer textarea')?.focus(),
+                  80
+                )
+              }}
+            >
+              <Upload size={14} />
+              上传到会话
+            </button>
+            <button
+              className="primary-button"
+              disabled={excerpting}
+              onClick={() => {
+                const image = captureChoice
+                setCaptureChoice(null)
+                void runExcerpt({ imageDataUrl: image.dataUrl })
+              }}
+            >
+              {excerpting ? <Loader2 size={14} className="spin" /> : <NotebookPen size={14} />}
+              摘抄
+            </button>
+          </div>
+        </Modal>
       )}
       {confirmCreate && (
         <Modal

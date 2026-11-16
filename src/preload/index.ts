@@ -1,5 +1,7 @@
 import { contextBridge, ipcRenderer } from 'electron'
 import type {
+  ExcerptInput,
+  ExcerptResult,
   FolderDeleteResult,
   LastAssistantAnswer,
   MarginApi,
@@ -46,6 +48,10 @@ const api: MarginApi = {
     saveTextFile: (input) =>
       ipcRenderer.invoke('app:save-text-file', input) as Promise<string | null>,
     copyText: (text) => ipcRenderer.invoke('app:copy-text', text) as Promise<void>
+  },
+  excerpt: {
+    run: (input: ExcerptInput) =>
+      ipcRenderer.invoke('excerpt:run', input) as Promise<ExcerptResult>
   },
   window: {
     getState: () => ipcRenderer.invoke('window:get-state') as Promise<WindowState>,

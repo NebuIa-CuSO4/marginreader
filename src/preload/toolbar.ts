@@ -8,7 +8,7 @@ ipcRenderer.on('toolbar:selection', (_event, text: string) => {
 })
 
 contextBridge.exposeInMainWorld('toolbarApi', {
-  action: (action: 'translate' | 'explain' | 'save'): void => {
+  action: (action: 'translate' | 'explain' | 'save' | 'excerpt'): void => {
     ipcRenderer.send('selection:action', { action, text: selectedText })
   },
   close: (): void => ipcRenderer.send('toolbar:close')

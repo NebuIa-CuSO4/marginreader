@@ -24,7 +24,12 @@ import type {
   StreamEvent,
   Vocab
 } from '../shared/types'
-import type { CreateProjectInput, SendMessageInput } from '../shared/api'
+import type {
+  CreateProjectInput,
+  ExcerptInput,
+  ExcerptResult,
+  SendMessageInput
+} from '../shared/api'
 import { AppDatabase } from './database'
 import { getDatabasePath, getResource, getTempDir } from './paths'
 import { WindowManager } from './windowManager'
@@ -386,6 +391,48 @@ function registerIpc(): void {
   )
   ipcMain.handle('note-types:remove', (_event, id: string) => db.deleteNoteType(id))
 
+  ipcMain.handle('excerpt:run', async (_event, input: ExcerptInput): Promise<ExcerptResult> => {
+    const project = db.getProject(input.projectId)
+    if (!project) throw new Error('项目不存在。')
+    const text = (input.text ?? '').trim()
+    const imageDataUrl = input.imageDataUrl ?? ''
+    if (!text && !imageDataUrl) throw new Error('没有可摘抄的文字或图片。')
+    const raw = await bridge.excerpt(
+      input.projectId,
+      excerptPrompt(text, Boolean(imageDataUrl)),
+      imageDataUrl
+    )
+    let content = sanitizeExcerpt(raw)
+    if (!content) throw new Error('DeepSeek 没有返回摘抄内容。')
+    let exact: boolean | null = null
+    if (text) {
+      exact = normalizeExcerptText(content) === normalizeExcerptText(text)
+      if (!exact) content = text
+    }
+    const firstLine =
+      content
+        .split(/\r?\n/)
+        .map((line) => line.replace(/[#*_`>~-]/g, '').trim())
+        .find(Boolean) ?? ''
+    const stamp = new Date().toLocaleString('zh-CN', {
+      month: '2-digit',
+      day: '2-digit',
+      hour: '2-digit',
+      minute: '2-digit'
+    })
+    const title = imageDataUrl
+      ? `截图摘抄 · ${stamp}`
+      : (firstLine.slice(0, 28) || `摘抄 · ${stamp}`)
+    const note = db.saveNote({
+      projectId: input.projectId,
+      title,
+      content,
+      tags: ['摘抄'],
+      source: imageDataUrl ? '截图摘抄' : '划词摘抄'
+    })
+    return { note, exact }
+  })
+
   ipcMain.handle('notes:list', (_event, projectId: string, query = '') => db.listNotes(projectId, query))
   ipcMain.handle('notes:save', (_event, note: Partial<Note> & { projectId: string; title: string }) =>
     db.saveNote(note)
@@ -429,6 +476,36 @@ function createTray(): void {
   } catch (error) {
     debug(`tray failed: ${error instanceof Error ? error.message : String(error)}`)
   }
+}
+
+const EXCERPT_RULES =
+  '你是逐字摘抄器。必须一字不差地保留原文，不得改写、润色、总结、解释、补充、删除、纠正错别字或标点，不得添加原文没有的词句。只允许使用 Markdown 的标题、分段、列表和加粗来表达原文结构和重点。不要添加任何前言、说明、结论或代码围栏，直接输出整理后的原文。'
+
+function excerptPrompt(text: string, hasImage: boolean): string {
+  if (hasImage) {
+    return `${EXCERPT_RULES}\n\n请逐字识别这张图片中的全部文字，按阅读顺序整理；图片里没有的文字一个字也不要添加。`
+  }
+  return `${EXCERPT_RULES}\n\n【原文开始】\n${text}\n【原文结束】`
+}
+
+function normalizeExcerptText(value: string): string {
+  return value
+    .replace(/```(?:markdown|md)?\s*\n?/gi, '')
+    .replace(/```/g, '')
+    .replace(/!\[[^\]]*\]\([^)]*\)/g, '')
+    .replace(/\[([^\]]+)\]\([^)]*\)/g, '$1')
+    .replace(/[#>*_`~]/g, '')
+    .replace(/^\s*(?:[-+]|\d+\.)\s+/gm, '')
+    .replace(/\s+/g, '')
+    .trim()
+}
+
+function sanitizeExcerpt(value: string): string {
+  return value
+    .replace(/^\uFEFF/, '')
+    .replace(/^```(?:markdown|md)?\s*\n?/i, '')
+    .replace(/\n?```\s*$/i, '')
+    .trim()
 }
 
 async function bootstrap(): Promise<void> {
