@@ -26,6 +26,7 @@ interface StreamPayload extends StreamEvent {
 export interface SendOptions {
   imageDataUrl?: string
   fallbackText?: string
+  abortCheck?: () => boolean
 }
 
 export class BridgeError extends Error {
@@ -62,6 +63,10 @@ export class DeepSeekBridge {
       timer: NodeJS.Timeout
     }
   >()
+  private excerptId: string | null = null
+  private excerptProjectId: string | null = null
+  private excerptSent = false
+  private excerptCancelled = false
 
   constructor(
     private readonly db: AppDatabase,
@@ -75,8 +80,10 @@ export class DeepSeekBridge {
             imageAttached: boolean
             usedFallbackText: boolean
           }
-    ) => void
+    ) => void,
+    private readonly silent = false
   ) {
+    if (silent) this.emit = () => undefined
     ipcMain.on('deepseek:response', this.onResponse)
     ipcMain.on('deepseek:stream', this.onStream)
     ipcMain.on('deepseek:state', this.onState)
@@ -305,8 +312,36 @@ export class DeepSeekBridge {
     return this.bindUrl(projectId, url)
   }
 
+  currentExcerptProject(): string | null {
+    return this.excerptProjectId
+  }
+
+  currentExcerptSent(): boolean {
+    return this.excerptSent
+  }
+
+  async cancelExcerpt(): Promise<void> {
+    this.excerptCancelled = true
+    const assistantId = this.excerptId
+    if (!assistantId) return
+    const waiter = this.excerptWaiters.get(assistantId)
+    if (waiter) {
+      clearTimeout(waiter.timer)
+      this.excerptWaiters.delete(assistantId)
+      waiter.reject(new BridgeError('EXCERPT_CANCELLED', '会话维持任务已被用户发送打断。'))
+    }
+    this.excerptId = null
+    this.excerptProjectId = null
+    this.excerptSent = false
+    await this.stop()
+  }
+
   async excerpt(projectId: string, prompt: string, imageDataUrl = ''): Promise<string> {
     const assistantId = `excerpt-${randomUUID()}`
+    this.excerptId = assistantId
+    this.excerptProjectId = projectId
+    this.excerptSent = false
+    this.excerptCancelled = false
     const result = new Promise<string>((resolve, reject) => {
       const timer = setTimeout(() => {
         this.excerptWaiters.delete(assistantId)
@@ -317,14 +352,21 @@ export class DeepSeekBridge {
     try {
       await this.send(projectId, prompt, assistantId, true, {
         imageDataUrl,
-        fallbackText: prompt
+        fallbackText: prompt,
+        abortCheck: () => this.excerptCancelled
       })
+      this.excerptSent = true
       return await result
     } finally {
       const waiter = this.excerptWaiters.get(assistantId)
       if (waiter) {
         clearTimeout(waiter.timer)
         this.excerptWaiters.delete(assistantId)
+      }
+      if (this.excerptId === assistantId) {
+        this.excerptId = null
+        this.excerptProjectId = null
+        this.excerptSent = false
       }
     }
   }
@@ -339,7 +381,14 @@ export class DeepSeekBridge {
     if (!net.isOnline()) {
       throw new BridgeError('NETWORK_OFFLINE', '网络未连接，请检查网络后点击“重连”。')
     }
+    const ensureNotAborted = (): void => {
+      if (options.abortCheck?.()) {
+        throw new BridgeError('EXCERPT_CANCELLED', '会话维持任务已被用户发送打断。')
+      }
+    }
+    ensureNotAborted()
     const win = await this.ensureWindow()
+    ensureNotAborted()
     let binding = this.db.getBinding(projectId)
 
     if (binding?.url) {
@@ -350,8 +399,11 @@ export class DeepSeekBridge {
         throw new BridgeError('BINDING_INVALID', '当前项目绑定的对话链接无效，请重新绑定。')
       }
       if (currentId !== expected || current !== binding.url) {
+        ensureNotAborted()
         await this.loadUrl(binding.url, 20_000)
+        ensureNotAborted()
         await new Promise((resolve) => setTimeout(resolve, 800))
+        ensureNotAborted()
         const page = (await this.request('getState', {}, 5000)) as {
           url: string
           loginRequired: boolean
@@ -376,8 +428,11 @@ export class DeepSeekBridge {
       if (!createIfMissing) {
         throw new BridgeError('NO_BINDING', '当前项目还没有绑定 DeepSeek 对话。')
       }
+      ensureNotAborted()
       await this.loadUrl(BASE_URL, 20_000)
+      ensureNotAborted()
       await new Promise((resolve) => setTimeout(resolve, 1000))
+      ensureNotAborted()
       const page = (await this.request('getState', {}, 5000)) as {
         url: string
         loginRequired: boolean
@@ -391,6 +446,7 @@ export class DeepSeekBridge {
       }
     }
 
+    ensureNotAborted()
     const sendResult = (await this.request(
       'send',
       {
@@ -402,6 +458,10 @@ export class DeepSeekBridge {
       },
       35_000
     )) as { imageAttached?: boolean; usedFallbackText?: boolean }
+    if (options.abortCheck?.()) {
+      await this.stop()
+      throw new BridgeError('EXCERPT_CANCELLED', '会话维持任务已被用户发送打断。')
+    }
     if (options.imageDataUrl) {
       this.emit({
         type: 'screen',
@@ -566,7 +626,14 @@ export class DeepSeekBridge {
     })
   }
 
-  private onResponse = (_event: Electron.IpcMainEvent, response: BridgeResponse): void => {
+  private isOwnSender(event: Electron.IpcMainEvent): boolean {
+    return Boolean(
+      this.win && !this.win.isDestroyed() && event.sender.id === this.win.webContents.id
+    )
+  }
+
+  private onResponse = (event: Electron.IpcMainEvent, response: BridgeResponse): void => {
+    if (!this.isOwnSender(event)) return
     const pending = this.pending.get(response.id)
     if (!pending) return
     this.pending.delete(response.id)
@@ -583,7 +650,8 @@ export class DeepSeekBridge {
     }
   }
 
-  private onStream = (_event: Electron.IpcMainEvent, payload: StreamPayload): void => {
+  private onStream = (ipcEvent: Electron.IpcMainEvent, payload: StreamPayload): void => {
+    if (!this.isOwnSender(ipcEvent)) return
     const { requestId: _requestId, ...event } = payload
     const waiter = this.excerptWaiters.get(event.assistantId)
     if (waiter) {
@@ -602,9 +670,10 @@ export class DeepSeekBridge {
   }
 
   private onState = (
-    _event: Electron.IpcMainEvent,
+    event: Electron.IpcMainEvent,
     page: { url: string; title: string; loginRequired: boolean; composerReady: boolean }
   ): void => {
+    if (!this.isOwnSender(event)) return
     const phase: DeepSeekStatus['phase'] = page.loginRequired
       ? 'login_required'
       : page.composerReady

@@ -62,7 +62,7 @@ export function SettingsModal({
         setKeepAliveResult(result.errors[0] ?? '没有已绑定的会话需要维持。')
       } else {
         setKeepAliveResult(
-          `已处理 ${result.total} 条会话：成功 ${result.succeeded}，失败 ${result.failed}。` +
+          `已处理 ${result.total} 条会话：成功 ${result.succeeded}，失败 ${result.failed}，跳过 ${result.skipped}。` +
             (result.errors.length ? `\n${result.errors.slice(0, 3).join('\n')}` : '')
         )
       }

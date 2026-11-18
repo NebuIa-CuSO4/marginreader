@@ -67,6 +67,7 @@ export interface KeepAliveResult {
   total: number
   succeeded: number
   failed: number
+  skipped: number
   errors: string[]
 }
 

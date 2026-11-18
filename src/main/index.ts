@@ -41,6 +41,8 @@ import { SelectionService } from './selection'
 let db: AppDatabase
 let windows: WindowManager
 let bridge: DeepSeekBridge
+let keepAliveBridge: DeepSeekBridge | null = null
+const keepAliveSkipProjects = new Set<string>()
 let capture: CaptureService
 let selection: SelectionService
 let tray: Tray | null = null
@@ -273,7 +275,18 @@ function registerIpc(): void {
         error: '网络未连接，请检查网络后点击“重连”再发送。'
       }
     }
-    if (keepAliveRunning) keepAliveCancel = true
+    if (keepAliveRunning && keepAliveBridge) {
+      keepAliveSkipProjects.add(input.projectId)
+      if (keepAliveBridge.currentExcerptProject() === input.projectId) {
+        await Promise.race([
+          keepAliveBridge.cancelExcerpt(),
+          new Promise((resolve) => setTimeout(resolve, 1500))
+        ])
+        // Give the stopped keep-alive window a short buffer before the same
+        // conversation receives the real user message from the other window.
+        await new Promise((resolve) => setTimeout(resolve, 1000))
+      }
+    }
     const assistantId = input.assistantId || randomUUID()
     const displayText = input.displayText?.trim() || text
     const userMessage: ChatMessage = {
@@ -514,45 +527,76 @@ function sanitizeExcerpt(value: string): string {
 const KEEP_ALIVE_PROMPT =
   '请用简短要点总结先前对话的主要内容，保持当前对话继续可用。不要修改、删除或重新整理已有内容，不要添加与总结无关的说明。'
 let keepAliveRunning = false
-let keepAliveCancel = false
 
 async function runKeepAlive(): Promise<KeepAliveResult> {
   if (keepAliveRunning) {
-    return { total: 0, succeeded: 0, failed: 0, errors: ['会话维持任务已经在运行。'] }
+    return {
+      total: 0,
+      succeeded: 0,
+      failed: 0,
+      skipped: 0,
+      errors: ['会话维持任务已经在运行。']
+    }
   }
   if (!net.isOnline()) {
-    return { total: 0, succeeded: 0, failed: 0, errors: ['网络未连接，无法维持会话。'] }
+    return {
+      total: 0,
+      succeeded: 0,
+      failed: 0,
+      skipped: 0,
+      errors: ['网络未连接，无法维持会话。']
+    }
+  }
+  if (!keepAliveBridge) {
+    return {
+      total: 0,
+      succeeded: 0,
+      failed: 0,
+      skipped: 0,
+      errors: ['维持窗口还没有准备好。']
+    }
   }
   keepAliveRunning = true
-  keepAliveCancel = false
-  const bindings = db.listBindings()
-  const activeProjectId = db.getSettings().activeProjectId
+  keepAliveSkipProjects.clear()
+  const bindings = db.listBindingsByActivity()
   let succeeded = 0
+  let skipped = 0
   const errors: string[] = []
   try {
-    for (const binding of bindings) {
-      if (keepAliveCancel) break
-      try {
-        await bridge.excerpt(binding.projectId, KEEP_ALIVE_PROMPT)
-        succeeded += 1
-      } catch (error) {
-        const message = error instanceof Error ? error.message : String(error)
-        errors.push(`${binding.projectId}: ${message}`)
+    // Recent conversations first, in small serial batches. The separate
+    // keep-alive window lets the user keep chatting while these run.
+    for (let start = 0; start < bindings.length; start += 3) {
+      const batch = bindings.slice(start, start + 3)
+      for (const binding of batch) {
+        if (keepAliveSkipProjects.has(binding.projectId)) {
+          skipped += 1
+          continue
+        }
+        try {
+          await keepAliveBridge.excerpt(binding.projectId, KEEP_ALIVE_PROMPT)
+          succeeded += 1
+        } catch (error) {
+          if (keepAliveSkipProjects.has(binding.projectId)) {
+            skipped += 1
+            continue
+          }
+          const message = error instanceof Error ? error.message : String(error)
+          errors.push(`${binding.projectId}: ${message}`)
+        }
+        await new Promise((resolve) => setTimeout(resolve, 800))
       }
-      await new Promise((resolve) => setTimeout(resolve, 800))
+      if (start + 3 < bindings.length) {
+        await new Promise((resolve) => setTimeout(resolve, 1200))
+      }
     }
   } finally {
     keepAliveRunning = false
-    // Leave the hidden page on the active project so the next normal message
-    // does not accidentally target the last maintained conversation.
-    if (!keepAliveCancel) {
-      await bridge.reconnect(activeProjectId).catch(() => undefined)
-    }
   }
   return {
     total: bindings.length,
     succeeded,
-    failed: bindings.length - succeeded,
+    failed: bindings.length - succeeded - skipped,
+    skipped,
     errors
   }
 }
@@ -608,6 +652,10 @@ async function bootstrap(): Promise<void> {
   // lazy-render much later.
   void bridge.ensureWindow().catch((error) => {
     debug(`deepseek warmup failed: ${error instanceof Error ? error.message : String(error)}`)
+  })
+  keepAliveBridge = new DeepSeekBridge(db, () => undefined, true)
+  void keepAliveBridge.ensureWindow().catch((error) => {
+    debug(`keep-alive warmup failed: ${error instanceof Error ? error.message : String(error)}`)
   })
   capture = new CaptureService(
     windows,
@@ -672,6 +720,8 @@ app.on('before-quit', () => {
   tray?.destroy()
   tray = null
   selection?.destroy()
+  keepAliveBridge?.destroy()
+  keepAliveBridge = null
   bridge?.destroy()
   db?.close()
 })

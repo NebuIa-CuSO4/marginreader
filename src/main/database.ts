@@ -280,6 +280,30 @@ export class AppDatabase {
     }
   }
 
+  listBindingsByActivity(): ConversationBinding[] {
+    const rows = this.db
+      .prepare(
+        `SELECT cb.*,
+           COALESCE(
+             (SELECT MAX(m.created_at) FROM messages m WHERE m.project_id = cb.project_id),
+             cb.updated_at
+           ) AS activity
+         FROM conversation_bindings cb
+         WHERE cb.external_id IS NOT NULL AND cb.external_id <> ''
+           AND cb.url IS NOT NULL AND cb.url <> ''
+         ORDER BY activity DESC, cb.updated_at DESC`
+      )
+      .all() as unknown as Array<Record<string, unknown>>
+    return rows.map((row) => ({
+      projectId: String(row.project_id),
+      provider: 'deepseek-web',
+      externalId: row.external_id ? String(row.external_id) : null,
+      url: row.url ? String(row.url) : null,
+      status: String(row.status) as ConversationBinding['status'],
+      updatedAt: Number(row.updated_at)
+    }))
+  }
+
   listBindings(): ConversationBinding[] {
     const rows = this.db
       .prepare(
