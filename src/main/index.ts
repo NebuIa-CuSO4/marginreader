@@ -28,6 +28,7 @@ import type {
   CreateProjectInput,
   ExcerptInput,
   ExcerptResult,
+  KeepAliveResult,
   SendMessageInput
 } from '../shared/api'
 import { AppDatabase } from './database'
@@ -272,6 +273,7 @@ function registerIpc(): void {
         error: '网络未连接，请检查网络后点击“重连”再发送。'
       }
     }
+    if (keepAliveRunning) keepAliveCancel = true
     const assistantId = input.assistantId || randomUUID()
     const displayText = input.displayText?.trim() || text
     const userMessage: ChatMessage = {
@@ -366,6 +368,7 @@ function registerIpc(): void {
     return binding
   })
   ipcMain.handle('deepseek:diagnose', () => bridge.diagnose())
+  ipcMain.handle('deepseek:keep-alive', () => runKeepAlive())
   ipcMain.handle('deepseek:read-last', () => bridge.readLast())
 
   ipcMain.handle('capture:start', () => capture.start())
@@ -508,6 +511,73 @@ function sanitizeExcerpt(value: string): string {
     .trim()
 }
 
+const KEEP_ALIVE_PROMPT =
+  '请用简短要点总结先前对话的主要内容，保持当前对话继续可用。不要修改、删除或重新整理已有内容，不要添加与总结无关的说明。'
+let keepAliveRunning = false
+let keepAliveCancel = false
+
+async function runKeepAlive(): Promise<KeepAliveResult> {
+  if (keepAliveRunning) {
+    return { total: 0, succeeded: 0, failed: 0, errors: ['会话维持任务已经在运行。'] }
+  }
+  if (!net.isOnline()) {
+    return { total: 0, succeeded: 0, failed: 0, errors: ['网络未连接，无法维持会话。'] }
+  }
+  keepAliveRunning = true
+  keepAliveCancel = false
+  const bindings = db.listBindings()
+  const activeProjectId = db.getSettings().activeProjectId
+  let succeeded = 0
+  const errors: string[] = []
+  try {
+    for (const binding of bindings) {
+      if (keepAliveCancel) break
+      try {
+        await bridge.excerpt(binding.projectId, KEEP_ALIVE_PROMPT)
+        succeeded += 1
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error)
+        errors.push(`${binding.projectId}: ${message}`)
+      }
+      await new Promise((resolve) => setTimeout(resolve, 800))
+    }
+  } finally {
+    keepAliveRunning = false
+    // Leave the hidden page on the active project so the next normal message
+    // does not accidentally target the last maintained conversation.
+    if (!keepAliveCancel) {
+      await bridge.reconnect(activeProjectId).catch(() => undefined)
+    }
+  }
+  return {
+    total: bindings.length,
+    succeeded,
+    failed: bindings.length - succeeded,
+    errors
+  }
+}
+
+async function runStartupKeepAlive(): Promise<void> {
+  if (!net.isOnline()) return
+  for (let attempt = 0; attempt < 20; attempt += 1) {
+    const state = await bridge.getStatus().catch(() => null)
+    if (state?.phase === 'ready') {
+      await runKeepAlive()
+      return
+    }
+    if (state?.phase === 'login_required') return
+    await new Promise((resolve) => setTimeout(resolve, 3000))
+  }
+}
+
+function scheduleStartupKeepAlive(): void {
+  setTimeout(() => {
+    void runStartupKeepAlive().catch((error) => {
+      debug(`keep-alive failed: ${error instanceof Error ? error.message : String(error)}`)
+    })
+  }, 10_000)
+}
+
 async function bootstrap(): Promise<void> {
   debug('bootstrap start')
   app.setAppUserModelId('com.margin.reader')
@@ -559,6 +629,7 @@ async function bootstrap(): Promise<void> {
   registerIpc()
   const mainWindow = windows.create(settings)
   debug('main window created')
+  scheduleStartupKeepAlive()
   mainWindow.on('closed', () => {
     if (!isQuitting) app.quit()
   })

@@ -2357,3 +2357,28 @@ button:disabled {
   font-size: 10px;
   text-align: right;
 }
+
+/* Keep-alive settings */
+.keepalive-row {
+  align-items: flex-start;
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px solid var(--line);
+}
+
+.keepalive-row .ghost-button {
+  flex: 0 0 auto;
+  white-space: nowrap;
+}
+
+.keepalive-result {
+  margin: 7px 0 0;
+  padding: 8px 9px;
+  border-radius: 7px;
+  color: var(--muted);
+  background: var(--surface-2);
+  font-family: var(--font-mono);
+  font-size: 9.5px;
+  line-height: 1.55;
+  white-space: pre-wrap;
+}

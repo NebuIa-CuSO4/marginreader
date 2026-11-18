@@ -63,6 +63,13 @@ export interface ExcerptResult {
   exact: boolean | null
 }
 
+export interface KeepAliveResult {
+  total: number
+  succeeded: number
+  failed: number
+  errors: string[]
+}
+
 export interface MarginApi {
   app: {
     bootstrap: () => Promise<BootstrapData>
@@ -102,6 +109,7 @@ export interface MarginApi {
     bindCurrent: (projectId: string) => Promise<ConversationBinding>
     bindUrl: (projectId: string, url: string) => Promise<ConversationBinding>
     diagnose: () => Promise<Record<string, unknown>>
+    keepAliveAll: () => Promise<KeepAliveResult>
     readLast: () => Promise<LastAssistantAnswer>
     onStatusChange: (callback: (status: DeepSeekStatus) => void) => () => void
   }

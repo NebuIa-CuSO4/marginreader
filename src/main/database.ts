@@ -280,6 +280,24 @@ export class AppDatabase {
     }
   }
 
+  listBindings(): ConversationBinding[] {
+    const rows = this.db
+      .prepare(
+        `SELECT * FROM conversation_bindings
+         WHERE external_id IS NOT NULL AND external_id <> '' AND url IS NOT NULL AND url <> ''
+         ORDER BY updated_at ASC`
+      )
+      .all() as unknown as Array<Record<string, unknown>>
+    return rows.map((row) => ({
+      projectId: String(row.project_id),
+      provider: 'deepseek-web',
+      externalId: row.external_id ? String(row.external_id) : null,
+      url: row.url ? String(row.url) : null,
+      status: String(row.status) as ConversationBinding['status'],
+      updatedAt: Number(row.updated_at)
+    }))
+  }
+
   upsertBinding(binding: ConversationBinding): void {
     this.db
       .prepare(

@@ -3,6 +3,7 @@ import type {
   ExcerptInput,
   ExcerptResult,
   FolderDeleteResult,
+  KeepAliveResult,
   LastAssistantAnswer,
   MarginApi,
   ProjectUsage
@@ -82,6 +83,8 @@ const api: MarginApi = {
     bindUrl: (projectId, url) =>
       ipcRenderer.invoke('deepseek:bind-url', projectId, url) as Promise<ConversationBinding>,
     diagnose: () => ipcRenderer.invoke('deepseek:diagnose') as Promise<Record<string, unknown>>,
+    keepAliveAll: () =>
+      ipcRenderer.invoke('deepseek:keep-alive') as Promise<KeepAliveResult>,
     readLast: () =>
       ipcRenderer.invoke('deepseek:read-last') as Promise<LastAssistantAnswer>,
     onStatusChange: (callback) => subscribe<DeepSeekStatus>('deepseek:status-changed', callback)

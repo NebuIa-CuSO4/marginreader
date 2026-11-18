@@ -1,5 +1,14 @@
 import { useState } from 'react'
-import { Download, ExternalLink, Monitor, PanelTop, ShieldAlert, Stethoscope } from 'lucide-react'
+import {
+  Download,
+  ExternalLink,
+  Loader2,
+  Monitor,
+  PanelTop,
+  RefreshCw,
+  ShieldAlert,
+  Stethoscope
+} from 'lucide-react'
 import type { DeepSeekStatus, Settings } from '../../../shared/types'
 import { Modal } from './Modal'
 
@@ -28,6 +37,8 @@ export function SettingsModal({
   const [saved, setSaved] = useState(false)
   const [diagnostic, setDiagnostic] = useState('')
   const [diagnosing, setDiagnosing] = useState(false)
+  const [keepingAlive, setKeepingAlive] = useState(false)
+  const [keepAliveResult, setKeepAliveResult] = useState('')
 
   async function diagnose(): Promise<void> {
     setDiagnosing(true)
@@ -39,6 +50,26 @@ export function SettingsModal({
       setDiagnostic(error instanceof Error ? error.message : String(error))
     } finally {
       setDiagnosing(false)
+    }
+  }
+
+  async function keepAliveAll(): Promise<void> {
+    setKeepingAlive(true)
+    setKeepAliveResult('')
+    try {
+      const result = await window.margin.deepseek.keepAliveAll()
+      if (result.total === 0) {
+        setKeepAliveResult(result.errors[0] ?? '没有已绑定的会话需要维持。')
+      } else {
+        setKeepAliveResult(
+          `已处理 ${result.total} 条会话：成功 ${result.succeeded}，失败 ${result.failed}。` +
+            (result.errors.length ? `\n${result.errors.slice(0, 3).join('\n')}` : '')
+        )
+      }
+    } catch (error) {
+      setKeepAliveResult(error instanceof Error ? error.message : String(error))
+    } finally {
+      setKeepingAlive(false)
     }
   }
 
@@ -141,6 +172,27 @@ export function SettingsModal({
             </div>
           </div>
           {diagnostic && <pre className="diagnostic">{diagnostic}</pre>}
+          <div className="setting-row keepalive-row">
+            <div>
+              <strong>维持所有会话活跃</strong>
+              <span>
+                DeepSeek 会冻结长期无消息的网页会话。启动应用时会自动发送一次隐藏的总结请求；也可以现在手动向所有已绑定会话发送。
+              </span>
+            </div>
+            <button
+              className="ghost-button"
+              disabled={keepingAlive}
+              onClick={() => void keepAliveAll()}
+            >
+              {keepingAlive ? (
+                <Loader2 size={14} className="spin" />
+              ) : (
+                <RefreshCw size={14} />
+              )}
+              {keepingAlive ? '维持中…' : '立即维持'}
+            </button>
+          </div>
+          {keepAliveResult && <pre className="keepalive-result">{keepAliveResult}</pre>}
           <div className="risk-note">
             <ShieldAlert size={15} />
             <span>这是基于你自己账号的网页桥接，不是 DeepSeek 官方接口。请只用于个人学习，不要高频自动操作。</span>
