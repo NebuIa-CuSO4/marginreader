@@ -1642,7 +1642,15 @@ button:disabled {
 }
 
 .check-row input {
+  flex: 0 0 auto;
+  width: 15px;
+  height: 15px;
+  margin: 0;
   accent-color: var(--accent);
+}
+
+.check-row span {
+  flex: 1 1 auto;
 }
 
 .connection-card {
@@ -2416,6 +2424,21 @@ button:disabled {
   grid-column: 1 / -1;
 }
 
+.provider-form label.provider-check {
+  flex-direction: row;
+  align-items: center;
+  justify-content: flex-start;
+  gap: 8px;
+  grid-column: 1 / -1;
+  cursor: pointer;
+}
+
+.provider-form label.provider-check span {
+  flex: 1 1 auto;
+  color: var(--text);
+  font-size: 11px;
+}
+
 .provider-form input,
 .provider-form textarea,
 .key-input input {
@@ -2982,4 +3005,64 @@ button:disabled {
 .inspector-log-item .inspector-badge.error,
 .inspector-log-item .inspector-badge.done {
   flex: 0 0 auto;
+}
+
+.vision-probe {
+  display: flex;
+  align-items: flex-end;
+  gap: 8px;
+  grid-column: 1 / -1;
+}
+
+.vision-probe label {
+  flex: 1 1 auto;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.vision-probe input {
+  width: 100%;
+  padding: 6px 8px;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  color: var(--text);
+  background: var(--surface);
+  font: inherit;
+  font-size: 12px;
+  box-sizing: border-box;
+}
+
+.vision-probe .ghost-button {
+  flex: 0 0 auto;
+  white-space: nowrap;
+}
+
+.provider-check {
+  display: flex;
+  align-items: center;
+  justify-content: flex-start;
+  gap: 8px;
+  grid-column: 1 / -1;
+}
+
+.provider-check input[type="checkbox"] {
+  flex: 0 0 auto;
+  width: 15px;
+  height: 15px;
+  margin: 0;
+}
+
+.provider-check span {
+  flex: 1 1 auto;
+  color: var(--text);
+  font-size: 11px;
+  text-align: left;
+}
+
+.key-input .ghost-button {
+  flex: 0 0 auto;
+  white-space: nowrap;
 }

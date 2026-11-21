@@ -635,10 +635,20 @@ function registerIpc(): void {
       _event,
       input: Partial<ApiProvider> & { id: string; name: string; baseUrl: string }
     ) => {
+      if (!input.baseUrl?.trim()) throw new Error('Base URL 不能为空。')
       const provider = db.saveApiProvider(input)
       const settings = db.getSettings()
       if (!settings.defaultProviderId) {
         db.updateSettings({ defaultProviderId: provider.id, defaultModel: provider.defaultModel })
+      }
+      const conversations = db
+        .listProjects()
+        .map((project) => db.getConversation(project.id))
+        .filter((item): item is ApiConversation => Boolean(item && item.providerId === provider.id))
+      for (const conversation of conversations) {
+        if (!conversation.model && provider.defaultModel) {
+          db.updateConversation(conversation.projectId, { model: provider.defaultModel })
+        }
       }
       await emitApiStatus()
       return { ...provider, hasKey: await hasApiKey(provider.id) }
@@ -679,33 +689,43 @@ function registerIpc(): void {
     await emitApiStatus()
   })
 
-  ipcMain.handle('api:test', async (_event, providerId: string): Promise<ApiTestResult> => {
-    const provider = db.getApiProvider(providerId)
-    if (!provider) return { ok: false, message: 'API 配置不存在。' }
-    const key = await getApiKey(providerId)
-    if (!key) return { ok: false, message: '还没有配置 API Key。' }
-    try {
-      const result = await testApiProvider(provider, key)
-      if (result.models.length) {
-        db.saveApiProvider({
-          ...provider,
-          models: Array.from(new Set([...provider.models, ...result.models])),
-          defaultModel:
-            provider.defaultModel && result.models.includes(provider.defaultModel)
-              ? provider.defaultModel
-              : result.models[0]
-        })
+  ipcMain.handle(
+    'api:test',
+    async (
+      _event,
+      providerId: string,
+      options?: { model?: string; probeImages?: boolean }
+    ): Promise<ApiTestResult> => {
+      const provider = db.getApiProvider(providerId)
+      if (!provider) return { ok: false, message: 'API 配置不存在。' }
+      const key = await getApiKey(providerId)
+      if (!key) return { ok: false, message: '还没有配置 API Key。' }
+      const model = options?.model?.trim() || provider.defaultModel
+      try {
+        const result = await testApiProvider(provider, key, model, Boolean(options?.probeImages))
+        if (result.models.length) {
+          db.saveApiProvider({
+            ...provider,
+            models: Array.from(new Set([...provider.models, ...result.models])),
+            defaultModel:
+              provider.defaultModel && result.models.includes(provider.defaultModel)
+                ? provider.defaultModel
+                : result.models[0]
+          })
+        }
+        await emitApiStatus()
+        const vision = result.vision
+        return {
+          ok: result.chat.ok && (vision ? vision.ok : true),
+          message: [result.chat.message, vision?.message].filter(Boolean).join(' '),
+          models: result.models,
+          supportsVision: vision?.ok
+        }
+      } catch (error) {
+        return { ok: false, message: error instanceof Error ? error.message : String(error) }
       }
-      await emitApiStatus()
-      return {
-        ok: true,
-        message: `连接成功${result.models.length ? `，发现 ${result.models.length} 个模型。` : '。'}`,
-        models: result.models
-      }
-    } catch (error) {
-      return { ok: false, message: error instanceof Error ? error.message : String(error) }
     }
-  })
+  )
 
   ipcMain.handle('api:status', () => apiStatusFor(db.getSettings().activeProjectId))
 

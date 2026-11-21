@@ -62,6 +62,7 @@ export interface ApiTestResult {
   ok: boolean
   message: string
   models?: string[]
+  supportsVision?: boolean
 }
 
 export interface MarginApi {
@@ -104,7 +105,7 @@ export interface MarginApi {
     deleteProvider: (id: string) => Promise<void>
     saveKey: (providerId: string, key: string) => Promise<void>
     clearKey: (providerId: string) => Promise<void>
-    test: (providerId: string) => Promise<ApiTestResult>
+    test: (providerId: string, options?: { model?: string; probeImages?: boolean }) => Promise<ApiTestResult>
     status: () => Promise<ApiStatus>
     setConversation: (input: {
       projectId: string

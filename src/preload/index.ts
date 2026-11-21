@@ -86,7 +86,8 @@ const api: MarginApi = {
     saveKey: (providerId, key) =>
       ipcRenderer.invoke('api:save-key', providerId, key) as Promise<void>,
     clearKey: (providerId) => ipcRenderer.invoke('api:clear-key', providerId) as Promise<void>,
-    test: (providerId) => ipcRenderer.invoke('api:test', providerId) as Promise<ApiTestResult>,
+    test: (providerId, options) =>
+      ipcRenderer.invoke('api:test', providerId, options) as Promise<ApiTestResult>,
     status: () => ipcRenderer.invoke('api:status') as Promise<ApiStatus>,
     setConversation: (input) =>
       ipcRenderer.invoke('api:set-conversation', input) as Promise<ApiConversation | null>,

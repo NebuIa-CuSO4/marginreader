@@ -49,6 +49,8 @@ export function SettingsModal({
   const [apiKey, setApiKey] = useState('')
   const [busy, setBusy] = useState(false)
   const [result, setResult] = useState('')
+  const [dirty, setDirty] = useState(false)
+  const [testModel, setTestModel] = useState('')
 
   const selected = providers.find((provider) => provider.id === selectedId) ?? null
   const selectedModel = conversation?.model ?? defaultModel
@@ -60,7 +62,9 @@ export function SettingsModal({
     setModels(selected.models.join('\n'))
     setDefaultModel(selected.defaultModel)
     setSupportsVision(selected.supportsVision)
+    setTestModel(selected.defaultModel || selected.models[0] || '')
     setApiKey('')
+    setDirty(false)
   }, [selected])
 
   async function run(task: () => Promise<void>): Promise<void> {
@@ -98,8 +102,31 @@ export function SettingsModal({
       const provider = await window.margin.api.saveProvider(providerPayload())
       await onRefresh()
       setSelectedId(provider.id)
+      setDirty(false)
       setResult('API 配置已保存。')
     })
+  }
+
+  async function toggleVision(next: boolean): Promise<void> {
+    setSupportsVision(next)
+    setDirty(true)
+    if (!selected || !next) return
+    // Persist the capability immediately so closing the dialog cannot lose it.
+    setBusy(true)
+    setResult('')
+    try {
+      await window.margin.api.saveProvider({
+        ...providerPayload(),
+        supportsVision: true
+      })
+      setDirty(false)
+      await onRefresh()
+      setResult('已保存：该 API 支持图片输入。')
+    } catch (error) {
+      setResult(error instanceof Error ? error.message : String(error))
+    } finally {
+      setBusy(false)
+    }
   }
 
   async function saveKey(): Promise<void> {
@@ -115,11 +142,32 @@ export function SettingsModal({
   async function test(): Promise<void> {
     if (!selected) return
     await run(async () => {
-      const testResult = await window.margin.api.test(selected.id)
+      const testResult = await window.margin.api.test(selected.id, {
+        model: testModel || undefined,
+        probeImages: true
+      })
       setResult(testResult.message)
-      if (testResult.ok) {
+      await onRefresh()
+      if (testResult.models?.length) setModels(testResult.models.join('\n'))
+    })
+  }
+
+  async function detectVision(): Promise<void> {
+    if (!selected) return
+    await run(async () => {
+      const testResult = await window.margin.api.test(selected.id, {
+        model: testModel || undefined,
+        probeImages: true
+      })
+      setResult(testResult.message)
+      if (testResult.supportsVision !== undefined && testResult.supportsVision !== supportsVision) {
+        await window.margin.api.saveProvider({
+          ...providerPayload(),
+          supportsVision: testResult.supportsVision
+        })
+        setSupportsVision(testResult.supportsVision)
+        setDirty(false)
         await onRefresh()
-        if (testResult.models?.length) setModels(testResult.models.join('\n'))
       }
     })
   }
@@ -189,13 +237,13 @@ export function SettingsModal({
           <div className="provider-form">
             <label>
               名称
-              <input value={name} onChange={(event) => setName(event.target.value)} />
+              <input value={name} onChange={(event) => { setName(event.target.value); setDirty(true) }} />
             </label>
             <label>
               Base URL
               <input
                 value={baseUrl}
-                onChange={(event) => setBaseUrl(event.target.value)}
+                onChange={(event) => { setBaseUrl(event.target.value); setDirty(true) }}
                 placeholder="https://api.deepseek.com"
               />
             </label>
@@ -204,27 +252,42 @@ export function SettingsModal({
               <textarea
                 rows={3}
                 value={models}
-                onChange={(event) => setModels(event.target.value)}
+                onChange={(event) => { setModels(event.target.value); setDirty(true) }}
               />
             </label>
             <label>
               默认模型
               <input
                 value={defaultModel}
-                onChange={(event) => setDefaultModel(event.target.value)}
+                onChange={(event) => { setDefaultModel(event.target.value); setDirty(true) }}
               />
             </label>
             <label className="check-row provider-check">
               <input
                 type="checkbox"
                 checked={supportsVision}
-                onChange={(event) => setSupportsVision(event.target.checked)}
+                disabled={busy}
+                onChange={(event) => void toggleVision(event.target.checked)}
               />
-              <span>该 API / 模型支持图片输入</span>
+              <span>该 API / 模型支持图片输入（勾选后立即保存）</span>
             </label>
+            <div className="vision-probe">
+              <label>
+                用哪个模型测试
+                <input
+                  value={testModel}
+                  onChange={(event) => setTestModel(event.target.value)}
+                  placeholder={selected?.defaultModel || 'deepseek-chat'}
+                />
+              </label>
+              <button className="ghost-button" disabled={busy} onClick={() => void detectVision()}>
+                {busy ? <Loader2 size={14} className="spin" /> : <RefreshCw size={14} />}
+                测试图片支持
+              </button>
+            </div>
             <div className="provider-actions">
               <button className="primary-button" disabled={busy} onClick={() => void saveProvider()}>
-                保存 API
+                {dirty ? '保存 API（有未保存修改）' : '保存 API'}
               </button>
               <button className="ghost-button" disabled={busy} onClick={() => void test()}>
                 {busy ? <Loader2 size={14} className="spin" /> : <RefreshCw size={14} />}

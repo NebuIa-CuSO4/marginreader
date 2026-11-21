@@ -163,7 +163,63 @@ export async function streamChat(
   return { content, reasoning, usage, finishReason }
 }
 
-async function testChatEndpoint(provider: ApiProvider, apiKey: string): Promise<void> {
+async function probeVision(
+  provider: ApiProvider,
+  apiKey: string,
+  model: string
+): Promise<{ ok: boolean; message: string }> {
+  const image =
+    'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg=='
+  try {
+    const response = await net.fetch(endpoint(provider.baseUrl), {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${apiKey}`,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        model,
+        messages: [
+          {
+            role: 'user',
+            content: [
+              { type: 'text', text: '这张图是什么颜色？只回答颜色。' },
+              { type: 'image_url', image_url: { url: image } }
+            ]
+          }
+        ],
+        max_tokens: 16,
+        stream: false
+      })
+    })
+    if (response.ok) {
+      return { ok: true, message: `模型 ${model} 接受了图片输入。` }
+    }
+    const text = await response.text().catch(() => '')
+    let detail = text
+    try {
+      const parsed = JSON.parse(text) as { error?: { message?: string } }
+      detail = parsed.error?.message ?? text
+    } catch {
+      // keep raw text
+    }
+    const rejected = /image|vision|multimodal|图片|不支持/i.test(detail)
+    return {
+      ok: false,
+      message: rejected
+        ? `模型 ${model} 不支持图片输入：${detail.slice(0, 160)}`
+        : `模型 ${model} 未接受图片（HTTP ${response.status}）：${detail.slice(0, 160)}`
+    }
+  } catch (error) {
+    return { ok: false, message: `测试失败：${(error as Error).message}` }
+  }
+}
+
+async function testChatEndpoint(
+  provider: ApiProvider,
+  apiKey: string,
+  model: string
+): Promise<{ ok: boolean; message: string }> {
   const response = await net.fetch(endpoint(provider.baseUrl), {
     method: 'POST',
     headers: {
@@ -171,7 +227,7 @@ async function testChatEndpoint(provider: ApiProvider, apiKey: string): Promise<
       'Content-Type': 'application/json'
     },
     body: JSON.stringify({
-      model: provider.defaultModel || provider.models[0] || 'default',
+      model: model || 'default',
       messages: [{ role: 'user', content: 'ping' }],
       max_tokens: 1,
       stream: false
@@ -181,26 +237,29 @@ async function testChatEndpoint(provider: ApiProvider, apiKey: string): Promise<
     const text = await response.text().catch(() => '')
     throw statusError(response.status, text)
   }
+  return { ok: true, message: `模型 ${model} 可用。` }
 }
 
 export async function testApiProvider(
   provider: ApiProvider,
-  apiKey: string
-): Promise<{ models: string[] }> {
-  const response = await net.fetch(modelsEndpoint(provider.baseUrl), {
-    headers: { Authorization: `Bearer ${apiKey}`, Accept: 'application/json' }
-  })
-  if (!response.ok) {
-    if (response.status === 404 || response.status === 405) {
-      await testChatEndpoint(provider, apiKey)
-      return { models: [] }
+  apiKey: string,
+  model: string,
+  probeImages: boolean
+): Promise<{ models: string[]; chat: { ok: boolean; message: string }; vision?: { ok: boolean; message: string } }> {
+  let models: string[] = []
+  try {
+    const response = await net.fetch(modelsEndpoint(provider.baseUrl), {
+      headers: { Authorization: `Bearer ${apiKey}`, Accept: 'application/json' }
+    })
+    if (response.ok) {
+      const payload = (await response.json()) as { data?: Array<{ id?: string }> }
+      models = (payload.data ?? []).map((item) => String(item.id ?? '')).filter(Boolean)
     }
-    const text = await response.text().catch(() => '')
-    throw statusError(response.status, text)
+  } catch {
+    models = []
   }
-  const payload = (await response.json()) as { data?: Array<{ id?: string }> }
-  const models = (payload.data ?? [])
-    .map((item) => String(item.id ?? ''))
-    .filter(Boolean)
-  return { models }
+  const target = model || provider.defaultModel || provider.models[0] || ''
+  const chat = await testChatEndpoint(provider, apiKey, target)
+  const vision = probeImages ? await probeVision(provider, apiKey, target) : undefined
+  return { models, chat, vision }
 }
