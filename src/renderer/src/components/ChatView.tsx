@@ -22,7 +22,7 @@ interface ChatViewProps {
   onLoadOlder: () => Promise<void>
   sending: boolean
   composer: string
-  hasBinding: boolean
+  apiReady: boolean
   pendingImage: { dataUrl: string; width: number; height: number } | null
   onRemoveImage: () => void
   onComposerChange: (value: string) => void
@@ -31,8 +31,6 @@ interface ChatViewProps {
   onCapture: () => void
   onSelectionHelp: () => void
   onSaveAnswer: (content: string) => void
-  onRecoverAnswer: (assistantId: string) => void
-  onOpenWeb: () => void
   onSaveVocabAnswer: (answer: string, question: string) => void
 }
 
@@ -40,8 +38,6 @@ interface MessageRowProps {
   message: ChatMessage
   previousUser: ChatMessage | undefined
   onSaveAnswer: (content: string) => void
-  onRecoverAnswer: (assistantId: string) => void
-  onOpenWeb: () => void
   onSaveVocabAnswer: (answer: string, question: string) => void
 }
 
@@ -49,8 +45,6 @@ const MessageRow = memo(function MessageRow({
   message,
   previousUser,
   onSaveAnswer,
-  onRecoverAnswer,
-  onOpenWeb,
   onSaveVocabAnswer
 }: MessageRowProps): React.JSX.Element {
   const displayContent = stripVocabBlock(message.content)
@@ -72,14 +66,6 @@ const MessageRow = memo(function MessageRow({
           {message.status === 'error' ? (
             <div className="message-error">
               <span>{message.content || '回答失败'}</span>
-              <div className="error-actions">
-                <button className="error-action" onClick={() => onRecoverAnswer(message.id)}>
-                  尝试读取网页最后一条回答
-                </button>
-                <button className="error-action" onClick={onOpenWeb}>
-                  打开网页面板确认
-                </button>
-              </div>
             </div>
           ) : displayContent ? (
             <Markdown content={displayContent} />
@@ -137,7 +123,7 @@ export function ChatView({
   onLoadOlder,
   sending,
   composer,
-  hasBinding,
+  apiReady,
   pendingImage,
   onRemoveImage,
   onComposerChange,
@@ -146,8 +132,6 @@ export function ChatView({
   onCapture,
   onSelectionHelp,
   onSaveAnswer,
-  onRecoverAnswer,
-  onOpenWeb,
   onSaveVocabAnswer
 }: ChatViewProps): React.JSX.Element {
   const scrollRef = useRef<HTMLDivElement>(null)
@@ -162,14 +146,12 @@ export function ChatView({
   const scrollFrameRef = useRef<number | null>(null)
   const initialScrollFrameRef = useRef<number | null>(null)
 
-  const actionRef = useRef({ onSaveAnswer, onRecoverAnswer, onOpenWeb, onSaveVocabAnswer })
-  actionRef.current = { onSaveAnswer, onRecoverAnswer, onOpenWeb, onSaveVocabAnswer }
+  const actionRef = useRef({ onSaveAnswer, onSaveVocabAnswer })
+  actionRef.current = { onSaveAnswer, onSaveVocabAnswer }
 
   const actions = useMemo(
     () => ({
       saveAnswer: (content: string) => actionRef.current.onSaveAnswer(content),
-      recoverAnswer: (assistantId: string) => actionRef.current.onRecoverAnswer(assistantId),
-      openWeb: () => actionRef.current.onOpenWeb(),
       saveVocabAnswer: (answer: string, question: string) =>
         actionRef.current.onSaveVocabAnswer(answer, question)
     }),
@@ -304,8 +286,6 @@ export function ChatView({
                 message={message}
                 previousUser={previousUsers.get(message.id)}
                 onSaveAnswer={actions.saveAnswer}
-                onRecoverAnswer={actions.recoverAnswer}
-                onOpenWeb={actions.openWeb}
                 onSaveVocabAnswer={actions.saveVocabAnswer}
               />
             ))}
@@ -314,9 +294,9 @@ export function ChatView({
       </div>
 
       <div className="composer-wrap">
-        {!hasBinding && (
+        {!apiReady && (
           <div className="composer-hint">
-            第一次发送会为当前项目创建一条 DeepSeek 网页对话，之后固定复用。
+            还没有配置 API。请先在设置中选择 API 服务、填写密钥并指定模型。
           </div>
         )}
         <div className="composer">

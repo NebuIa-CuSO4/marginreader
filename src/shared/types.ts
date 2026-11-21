@@ -8,21 +8,43 @@ export interface Project {
   createdAt: number
 }
 
-export type BindingStatus =
-  | 'unbound'
-  | 'connected'
-  | 'login_required'
-  | 'missing'
-  | 'mismatch'
-  | 'not_loaded'
+export type ApiProviderKind = 'deepseek' | 'openai-compatible'
 
-export interface ConversationBinding {
-  projectId: string
-  provider: 'deepseek-web'
-  externalId: string | null
-  url: string | null
-  status: BindingStatus
+export interface ApiProvider {
+  id: string
+  name: string
+  kind: ApiProviderKind
+  baseUrl: string
+  models: string[]
+  defaultModel: string
+  supportsVision: boolean
+  hasKey: boolean
+  createdAt: number
   updatedAt: number
+}
+
+export interface ApiConversation {
+  id: string
+  projectId: string
+  providerId: string
+  model: string
+  title: string
+  source: 'api' | 'migrated-web'
+  createdAt: number
+  updatedAt: number
+}
+
+export interface ApiStatus {
+  phase: 'not_configured' | 'ready' | 'offline' | 'error'
+  message: string
+  providerId?: string
+  model?: string
+}
+
+export interface ApiUsage {
+  promptTokens: number
+  completionTokens: number
+  totalTokens: number
 }
 
 export type MessageRole = 'user' | 'assistant' | 'system'
@@ -42,11 +64,14 @@ export interface MessagePage {
 export interface ChatMessage {
   id: string
   projectId: string
+  conversationId?: string
   role: MessageRole
   content: string
   reasoning?: string
   status: MessageStatus
   createdAt: number
+  model?: string
+  usage?: ApiUsage
 }
 
 export type NoteType = 'note' | 'vocab'
@@ -119,16 +144,8 @@ export interface Settings {
   launchAtLogin: boolean
   activeProjectId: string
   onboardingDone: boolean
-}
-
-export interface DeepSeekStatus {
-  phase: 'not_started' | 'loading' | 'login_required' | 'ready' | 'offline' | 'error'
-  url: string
-  externalId: string | null
-  loginRequired: boolean
-  composerReady: boolean
-  pageTitle: string
-  message: string
+  defaultProviderId: string
+  defaultModel: string
 }
 
 export interface WindowState {
@@ -140,7 +157,9 @@ export interface WindowState {
 export interface BootstrapData {
   projects: Project[]
   activeProjectId: string
-  binding: ConversationBinding | null
+  apiProviders: ApiProvider[]
+  conversation: ApiConversation | null
+  apiStatus: ApiStatus
   messages: ChatMessage[]
   messagesHasMore: boolean
   notes: Note[]
@@ -149,7 +168,6 @@ export interface BootstrapData {
   noteTypes: NoteTypeDefinition[]
   settings: Settings
   windowState: WindowState
-  deepseek: DeepSeekStatus
 }
 
 export interface CaptureResult {
@@ -175,12 +193,6 @@ export interface StreamEvent {
   text?: string
   reasoning?: string
   error?: string
-}
-
-export interface ScreenStatusEvent {
-  projectId: string
-  imageAttached: boolean
-  usedFallbackText: boolean
 }
 
 export interface IpcResult<T> {

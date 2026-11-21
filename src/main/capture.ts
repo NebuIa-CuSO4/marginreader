@@ -128,6 +128,22 @@ export class CaptureService {
     }
   }
 
+  async ocrDataUrl(dataUrl: string): Promise<string> {
+    const match = dataUrl.match(/^data:image\/[^;]+;base64,(.+)$/)
+    if (!match) return ''
+    const filePath = path.join(getTempDir(), `${randomUUID()}-ocr.png`)
+    try {
+      await fs.mkdir(path.dirname(filePath), { recursive: true })
+      await fs.writeFile(filePath, Buffer.from(match[1], 'base64'))
+      const payload = await this.recognize(filePath, this.getSettings().ocrLanguage)
+      return (payload.text ?? '').trim()
+    } catch {
+      return ''
+    } finally {
+      await fs.rm(filePath, { force: true }).catch(() => undefined)
+    }
+  }
+
   async captureForContext(): Promise<ScreenContext> {
     const cursor = screen.getCursorScreenPoint()
     const display = screen.getDisplayNearestPoint(cursor)

@@ -1,33 +1,38 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import {
   Download,
-  ExternalLink,
+  KeyRound,
   Loader2,
   Monitor,
   PanelTop,
+  Plus,
   RefreshCw,
   ShieldAlert,
-  Stethoscope
+  Trash2
 } from 'lucide-react'
-import type { DeepSeekStatus, Settings } from '../../../shared/types'
+import type { ApiConversation, ApiProvider, ApiStatus, Settings } from '../../../shared/types'
 import { Modal } from './Modal'
 
 interface SettingsModalProps {
   settings: Settings
-  status: DeepSeekStatus
+  providers: ApiProvider[]
+  status: ApiStatus
+  conversation: ApiConversation | null
   onChange: (patch: Partial<Settings>) => Promise<void>
-  onOpenWeb: () => void
-  onHideWeb: () => void
+  onRefresh: () => Promise<void>
+  onConversationChange: (input: { providerId?: string; model?: string }) => Promise<void>
   onExport: () => Promise<void>
   onClose: () => void
 }
 
 export function SettingsModal({
   settings,
+  providers,
   status,
+  conversation,
   onChange,
-  onOpenWeb,
-  onHideWeb,
+  onRefresh,
+  onConversationChange,
   onExport,
   onClose
 }: SettingsModalProps): React.JSX.Element {
@@ -35,42 +40,116 @@ export function SettingsModal({
   const [screenshotShortcut, setScreenshotShortcut] = useState(settings.screenshotShortcut)
   const [selectionShortcut, setSelectionShortcut] = useState(settings.selectionShortcut)
   const [saved, setSaved] = useState(false)
-  const [diagnostic, setDiagnostic] = useState('')
-  const [diagnosing, setDiagnosing] = useState(false)
-  const [keepingAlive, setKeepingAlive] = useState(false)
-  const [keepAliveResult, setKeepAliveResult] = useState('')
+  const [selectedId, setSelectedId] = useState(conversation?.providerId ?? providers[0]?.id ?? '')
+  const [name, setName] = useState('')
+  const [baseUrl, setBaseUrl] = useState('')
+  const [models, setModels] = useState('')
+  const [defaultModel, setDefaultModel] = useState('')
+  const [supportsVision, setSupportsVision] = useState(false)
+  const [apiKey, setApiKey] = useState('')
+  const [busy, setBusy] = useState(false)
+  const [result, setResult] = useState('')
 
-  async function diagnose(): Promise<void> {
-    setDiagnosing(true)
-    setDiagnostic('')
+  const selected = providers.find((provider) => provider.id === selectedId) ?? null
+  const selectedModel = conversation?.model ?? defaultModel
+
+  useEffect(() => {
+    if (!selected) return
+    setName(selected.name)
+    setBaseUrl(selected.baseUrl)
+    setModels(selected.models.join('\n'))
+    setDefaultModel(selected.defaultModel)
+    setSupportsVision(selected.supportsVision)
+    setApiKey('')
+  }, [selected])
+
+  async function run(task: () => Promise<void>): Promise<void> {
+    setBusy(true)
+    setResult('')
     try {
-      const result = await window.margin.deepseek.diagnose()
-      setDiagnostic(JSON.stringify(result, null, 2))
+      await task()
     } catch (error) {
-      setDiagnostic(error instanceof Error ? error.message : String(error))
+      setResult(error instanceof Error ? error.message : String(error))
     } finally {
-      setDiagnosing(false)
+      setBusy(false)
     }
   }
 
-  async function keepAliveAll(): Promise<void> {
-    setKeepingAlive(true)
-    setKeepAliveResult('')
-    try {
-      const result = await window.margin.deepseek.keepAliveAll()
-      if (result.total === 0) {
-        setKeepAliveResult(result.errors[0] ?? '没有已绑定的会话需要维持。')
-      } else {
-        setKeepAliveResult(
-          `已处理 ${result.total} 条会话：成功 ${result.succeeded}，失败 ${result.failed}，跳过 ${result.skipped}。` +
-            (result.errors.length ? `\n${result.errors.slice(0, 3).join('\n')}` : '')
-        )
-      }
-    } catch (error) {
-      setKeepAliveResult(error instanceof Error ? error.message : String(error))
-    } finally {
-      setKeepingAlive(false)
+  function providerPayload(): Partial<ApiProvider> & { id: string; name: string; baseUrl: string } {
+    const modelList = models
+      .split(/[\n,，]/)
+      .map((item) => item.trim())
+      .filter(Boolean)
+    const fallback = defaultModel.trim()
+    if (fallback && !modelList.includes(fallback)) modelList.unshift(fallback)
+    return {
+      id: selected?.id ?? selectedId,
+      name: name.trim() || 'API',
+      baseUrl: baseUrl.trim(),
+      kind: selected?.kind ?? 'openai-compatible',
+      models: modelList,
+      defaultModel: fallback || modelList[0] || '',
+      supportsVision
     }
+  }
+
+  async function saveProvider(): Promise<void> {
+    await run(async () => {
+      const provider = await window.margin.api.saveProvider(providerPayload())
+      await onRefresh()
+      setSelectedId(provider.id)
+      setResult('API 配置已保存。')
+    })
+  }
+
+  async function saveKey(): Promise<void> {
+    if (!selected || !apiKey.trim()) return
+    await run(async () => {
+      await window.margin.api.saveKey(selected.id, apiKey)
+      setApiKey('')
+      await onRefresh()
+      setResult('API Key 已加密保存。')
+    })
+  }
+
+  async function test(): Promise<void> {
+    if (!selected) return
+    await run(async () => {
+      const testResult = await window.margin.api.test(selected.id)
+      setResult(testResult.message)
+      if (testResult.ok) {
+        await onRefresh()
+        if (testResult.models?.length) setModels(testResult.models.join('\n'))
+      }
+    })
+  }
+
+  async function addProvider(): Promise<void> {
+    const id = `api-${Date.now()}`
+    await run(async () => {
+      const provider = await window.margin.api.saveProvider({
+        id,
+        name: '自定义 API',
+        baseUrl: 'https://api.openai.com/v1',
+        kind: 'openai-compatible',
+        models: ['gpt-4o-mini'],
+        defaultModel: 'gpt-4o-mini',
+        supportsVision: false
+      })
+      await onRefresh()
+      setSelectedId(provider.id)
+      setResult('已添加 API，请填写地址和密钥。')
+    })
+  }
+
+  async function removeProvider(): Promise<void> {
+    if (!selected || providers.length <= 1) return
+    await run(async () => {
+      await window.margin.api.deleteProvider(selected.id)
+      await onRefresh()
+      setSelectedId(providers.find((provider) => provider.id !== selected.id)?.id ?? '')
+      setResult('API 配置已删除。')
+    })
   }
 
   async function saveShortcuts(): Promise<void> {
@@ -80,8 +159,175 @@ export function SettingsModal({
   }
 
   return (
-    <Modal title="设置" subtitle="侧栏、连接、截图识别和快捷键。" onClose={onClose} wide>
+    <Modal title="设置" subtitle="API 服务、模型、侧栏、截图识别和快捷键。" onClose={onClose} wide>
       <div className="settings-sections">
+        <section>
+          <h4>API 服务</h4>
+          <div className="provider-toolbar">
+            <select value={selectedId} onChange={(event) => setSelectedId(event.target.value)}>
+              {providers.map((provider) => (
+                <option key={provider.id} value={provider.id}>
+                  {provider.name}
+                  {provider.hasKey ? ' · 已配置密钥' : ''}
+                </option>
+              ))}
+            </select>
+            <button className="ghost-button" onClick={() => void addProvider()} disabled={busy}>
+              <Plus size={14} />
+              新增
+            </button>
+            <button
+              className="ghost-button danger-text"
+              onClick={() => void removeProvider()}
+              disabled={busy || providers.length <= 1}
+            >
+              <Trash2 size={14} />
+              删除
+            </button>
+          </div>
+
+          <div className="provider-form">
+            <label>
+              名称
+              <input value={name} onChange={(event) => setName(event.target.value)} />
+            </label>
+            <label>
+              Base URL
+              <input
+                value={baseUrl}
+                onChange={(event) => setBaseUrl(event.target.value)}
+                placeholder="https://api.deepseek.com"
+              />
+            </label>
+            <label>
+              模型列表（每行一个）
+              <textarea
+                rows={3}
+                value={models}
+                onChange={(event) => setModels(event.target.value)}
+              />
+            </label>
+            <label>
+              默认模型
+              <input
+                value={defaultModel}
+                onChange={(event) => setDefaultModel(event.target.value)}
+              />
+            </label>
+            <label className="check-row provider-check">
+              <input
+                type="checkbox"
+                checked={supportsVision}
+                onChange={(event) => setSupportsVision(event.target.checked)}
+              />
+              <span>该 API / 模型支持图片输入</span>
+            </label>
+            <div className="provider-actions">
+              <button className="primary-button" disabled={busy} onClick={() => void saveProvider()}>
+                保存 API
+              </button>
+              <button className="ghost-button" disabled={busy} onClick={() => void test()}>
+                {busy ? <Loader2 size={14} className="spin" /> : <RefreshCw size={14} />}
+                测试连接
+              </button>
+            </div>
+          </div>
+
+          <div className="key-row">
+            <div>
+              <strong>API Key</strong>
+              <span>{selected?.hasKey ? '已加密保存，输入新值可替换。' : '尚未配置。'}</span>
+            </div>
+            <div className="key-input">
+              <input
+                type="password"
+                value={apiKey}
+                onChange={(event) => setApiKey(event.target.value)}
+                placeholder={selected?.hasKey ? '输入新 Key 以替换' : 'sk-…'}
+              />
+              <button
+                className="ghost-button"
+                disabled={busy || !apiKey.trim()}
+                onClick={() => void saveKey()}
+              >
+                <KeyRound size={14} />
+                保存
+              </button>
+            </div>
+          </div>
+          {selected?.hasKey && (
+            <button
+              className="ghost-button clear-key"
+              disabled={busy}
+              onClick={() =>
+                void run(async () => {
+                  if (!selected) return
+                  await window.margin.api.clearKey(selected.id)
+                  await onRefresh()
+                  setResult('API Key 已清除。')
+                })
+              }
+            >
+              清除已保存的密钥
+            </button>
+          )}
+
+          <div className={`connection-card ${status.phase}`}>
+            <span className={`status-dot ${status.phase}`} />
+            <div>
+              <strong>{status.message}</strong>
+              <span>{conversation ? conversation.model : '当前项目尚未选择模型'}</span>
+            </div>
+          </div>
+
+          {result && <pre className="api-result">{result}</pre>}
+
+          <div className="risk-note">
+            <ShieldAlert size={15} />
+            <span>
+              API Key 只保存在本机，并使用系统加密；不会发送到渲染页面或写入导出文件。API
+              使用会计入你的服务商额度。
+            </span>
+          </div>
+        </section>
+
+        <section>
+          <h4>当前对话模型</h4>
+          <div className="setting-row">
+            <div>
+              <strong>项目使用的 API</strong>
+              <span>切换 API 不会删除历史消息，但不同模型的上下文能力可能不同。</span>
+            </div>
+            <select
+              value={conversation?.providerId ?? selectedId}
+              onChange={(event) => void onConversationChange({ providerId: event.target.value })}
+            >
+              {providers.map((provider) => (
+                <option key={provider.id} value={provider.id}>
+                  {provider.name}
+                </option>
+              ))}
+            </select>
+          </div>
+          <div className="setting-row">
+            <div>
+              <strong>模型</strong>
+              <span>同一个项目始终复用同一条本地对话，不会每条消息新建会话。</span>
+            </div>
+            <select
+              value={conversation?.model || selectedModel}
+              onChange={(event) => void onConversationChange({ model: event.target.value })}
+            >
+              {(providers.find((provider) => provider.id === (conversation?.providerId ?? selectedId))
+                ?.models ?? []).map((model) => (
+                <option key={model} value={model}>
+                  {model}
+                </option>
+              ))}
+            </select>
+          </div>
+        </section>
+
         <section>
           <h4>侧栏</h4>
           <div className="setting-row">
@@ -150,61 +396,11 @@ export function SettingsModal({
         </section>
 
         <section>
-          <h4>DeepSeek 网页</h4>
-          <div className={`connection-card ${status.phase}`}>
-            <span className={`status-dot ${status.phase}`} />
-            <div>
-              <strong>{status.message}</strong>
-              <span>{status.url || '还没有打开网页'}</span>
-            </div>
-            <div className="connection-actions">
-              <button className="ghost-button" onClick={() => void diagnose()} disabled={diagnosing}>
-                <Stethoscope size={14} />
-                {diagnosing ? '诊断中' : '诊断'}
-              </button>
-              <button className="ghost-button" onClick={onOpenWeb}>
-                <ExternalLink size={14} />
-                显示
-              </button>
-              <button className="ghost-button" onClick={onHideWeb}>
-                隐藏
-              </button>
-            </div>
-          </div>
-          {diagnostic && <pre className="diagnostic">{diagnostic}</pre>}
-          <div className="setting-row keepalive-row">
-            <div>
-              <strong>维持所有会话活跃</strong>
-              <span>
-                DeepSeek 会冻结长期无消息的网页会话。启动应用时会自动发送一次隐藏的总结请求；也可以现在手动向所有已绑定会话发送。
-              </span>
-            </div>
-            <button
-              className="ghost-button"
-              disabled={keepingAlive}
-              onClick={() => void keepAliveAll()}
-            >
-              {keepingAlive ? (
-                <Loader2 size={14} className="spin" />
-              ) : (
-                <RefreshCw size={14} />
-              )}
-              {keepingAlive ? '维持中…' : '立即维持'}
-            </button>
-          </div>
-          {keepAliveResult && <pre className="keepalive-result">{keepAliveResult}</pre>}
-          <div className="risk-note">
-            <ShieldAlert size={15} />
-            <span>这是基于你自己账号的网页桥接，不是 DeepSeek 官方接口。请只用于个人学习，不要高频自动操作。</span>
-          </div>
-        </section>
-
-        <section>
-          <h4>屏幕截图</h4>
+          <h4>屏幕截图与快捷键</h4>
           <div className="setting-row">
             <div>
               <strong>OCR 语言</strong>
-              <span>仅在网页不接受原图、需要退回文字时使用。英文书建议选 English；中英混排可先用自动。</span>
+              <span>截图模型不支持图片时，会先做本地 OCR 再发送文字。</span>
             </div>
             <select
               value={settings.ocrLanguage}
@@ -223,7 +419,7 @@ export function SettingsModal({
               checked={settings.autoScreenContext}
               onChange={(event) => void onChange({ autoScreenContext: event.target.checked })}
             />
-            <span>每次提问自动截取完整屏幕，优先把原图附加到网页对话；网页不接受时回退 OCR 文字</span>
+            <span>每次提问自动截取完整屏幕；模型支持图片时附带原图，否则使用 OCR 文字</span>
           </label>
           <label className="check-row">
             <input
@@ -231,44 +427,38 @@ export function SettingsModal({
               checked={settings.autoSendSelection}
               onChange={(event) => void onChange({ autoSendSelection: event.target.checked })}
             />
-            <span>划词后，若已有对话则自动发送翻译 / 解释</span>
+            <span>划词翻译 / 解释选好后自动发送</span>
           </label>
-        </section>
-
-        <section>
-          <h4>快捷键</h4>
           <div className="shortcut-grid">
-            <label className="field">
-              <span>展开 / 收起侧栏</span>
-              <input value={toggleShortcut} onChange={(event) => setToggleShortcut(event.target.value)} />
+            <label>
+              显示 / 收起
+              <input
+                value={toggleShortcut}
+                onChange={(event) => setToggleShortcut(event.target.value)}
+              />
             </label>
-            <label className="field">
-              <span>截图并附加图片</span>
-              <input value={screenshotShortcut} onChange={(event) => setScreenshotShortcut(event.target.value)} />
+            <label>
+              区域截图
+              <input
+                value={screenshotShortcut}
+                onChange={(event) => setScreenshotShortcut(event.target.value)}
+              />
             </label>
-            <label className="field">
-              <span>划词翻译 / 解释</span>
-              <input value={selectionShortcut} onChange={(event) => setSelectionShortcut(event.target.value)} />
+            <label>
+              划词工具
+              <input
+                value={selectionShortcut}
+                onChange={(event) => setSelectionShortcut(event.target.value)}
+              />
             </label>
           </div>
-          <div className="modal-actions compact">
-            <span className="saved-note">{saved ? '快捷键已保存' : '使用 CommandOrControl+Shift+… 格式'}</span>
+          <div className="settings-actions">
             <button className="ghost-button" onClick={() => void saveShortcuts()}>
-              保存快捷键
+              {saved ? '已保存' : '保存快捷键'}
             </button>
-          </div>
-        </section>
-
-        <section>
-          <h4>数据</h4>
-          <div className="setting-row">
-            <div>
-              <strong>导出备份</strong>
-              <span>导出项目、对话镜像、笔记、生词、文件夹和类型为 JSON；不包含截图。</span>
-            </div>
-            <button className="soft-button" onClick={() => void onExport()}>
-              <Download size={15} />
-              导出
+            <button className="ghost-button" onClick={() => void onExport()}>
+              <Download size={14} />
+              导出数据
             </button>
           </div>
         </section>

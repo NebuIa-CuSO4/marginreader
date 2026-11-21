@@ -18,7 +18,7 @@ export function DeleteProjectModal({
     <Modal title="删除阅读项目" subtitle={project.title} onClose={onClose}>
       <div className="danger-note">
         <AlertTriangle size={17} />
-        <span>此操作不可恢复。网页端 DeepSeek 对话不会被删除，但本地记录会一起删除。</span>
+        <span>此操作不可恢复。项目的本地 API 对话、消息、笔记和生词都会一起删除。</span>
       </div>
       <div className="delete-usage">
         <div>

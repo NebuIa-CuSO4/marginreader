@@ -84,7 +84,7 @@ export function VocabEditorModal({
         </label>
         <label className="field full">
           <span>出处</span>
-          <input value={source} onChange={(event) => setSource(event.target.value)} placeholder="书名、章节、网页对话" />
+          <input value={source} onChange={(event) => setSource(event.target.value)} placeholder="书名、章节、文章" />
         </label>
       </div>
       <div className="modal-actions">

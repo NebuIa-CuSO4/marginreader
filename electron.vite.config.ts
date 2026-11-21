@@ -17,7 +17,6 @@ export default defineConfig({
       rollupOptions: {
         input: {
           index: resolve(__dirname, 'src/preload/index.ts'),
-          deepseek: resolve(__dirname, 'src/preload/deepseek.ts'),
           overlay: resolve(__dirname, 'src/preload/overlay.ts'),
           toolbar: resolve(__dirname, 'src/preload/toolbar.ts')
         }

@@ -1,14 +1,14 @@
 import type {
+  ApiConversation,
+  ApiProvider,
+  ApiStatus,
   BootstrapData,
   CaptureResult,
-  ConversationBinding,
-  DeepSeekStatus,
   Folder,
   FolderKind,
   IpcResult,
   MessageCursor,
   MessagePage,
-  ScreenStatusEvent,
   Note,
   NoteTypeDefinition,
   Project,
@@ -24,11 +24,6 @@ export interface CreateProjectInput {
   kind: ProjectKind
   title: string
   author?: string
-}
-
-export interface LastAssistantAnswer {
-  text: string
-  reasoning: string
 }
 
 export interface ProjectUsage {
@@ -48,7 +43,6 @@ export interface SendMessageInput {
   text: string
   displayText?: string
   assistantId: string
-  createIfMissing: boolean
   imageDataUrl?: string
 }
 
@@ -63,12 +57,10 @@ export interface ExcerptResult {
   exact: boolean | null
 }
 
-export interface KeepAliveResult {
-  total: number
-  succeeded: number
-  failed: number
-  skipped: number
-  errors: string[]
+export interface ApiTestResult {
+  ok: boolean
+  message: string
+  models?: string[]
 }
 
 export interface MarginApi {
@@ -96,23 +88,25 @@ export interface MarginApi {
     onStateChange: (callback: (state: WindowState) => void) => () => void
   }
   chat: {
-    send: (input: SendMessageInput) => Promise<IpcResult<ConversationBinding | null>>
+    send: (input: SendMessageInput) => Promise<IpcResult<ApiConversation | null>>
     stop: () => Promise<void>
     messages: (projectId: string, before?: MessageCursor) => Promise<MessagePage>
     onStream: (callback: (event: StreamEvent) => void) => () => void
-    onScreenStatus: (callback: (event: ScreenStatusEvent) => void) => () => void
   }
-  deepseek: {
-    status: () => Promise<DeepSeekStatus>
-    reconnect: (projectId?: string) => Promise<DeepSeekStatus>
-    show: () => Promise<void>
-    hide: () => Promise<void>
-    bindCurrent: (projectId: string) => Promise<ConversationBinding>
-    bindUrl: (projectId: string, url: string) => Promise<ConversationBinding>
-    diagnose: () => Promise<Record<string, unknown>>
-    keepAliveAll: () => Promise<KeepAliveResult>
-    readLast: () => Promise<LastAssistantAnswer>
-    onStatusChange: (callback: (status: DeepSeekStatus) => void) => () => void
+  api: {
+    providers: () => Promise<ApiProvider[]>
+    saveProvider: (input: Partial<ApiProvider> & { id: string; name: string; baseUrl: string }) => Promise<ApiProvider>
+    deleteProvider: (id: string) => Promise<void>
+    saveKey: (providerId: string, key: string) => Promise<void>
+    clearKey: (providerId: string) => Promise<void>
+    test: (providerId: string) => Promise<ApiTestResult>
+    status: () => Promise<ApiStatus>
+    setConversation: (input: {
+      projectId: string
+      providerId?: string
+      model?: string
+    }) => Promise<ApiConversation | null>
+    onStatusChange: (callback: (status: ApiStatus) => void) => () => void
   }
   capture: {
     start: () => Promise<void>

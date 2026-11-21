@@ -1,18 +1,18 @@
 import { contextBridge, ipcRenderer } from 'electron'
 import type {
+  ApiTestResult,
   ExcerptInput,
   ExcerptResult,
   FolderDeleteResult,
-  KeepAliveResult,
-  LastAssistantAnswer,
   MarginApi,
   ProjectUsage
 } from '../shared/api'
 import type {
+  ApiConversation,
+  ApiProvider,
+  ApiStatus,
   BootstrapData,
   CaptureResult,
-  ConversationBinding,
-  DeepSeekStatus,
   Folder,
   FolderKind,
   IpcResult,
@@ -20,7 +20,6 @@ import type {
   Note,
   NoteTypeDefinition,
   Project,
-  ScreenStatusEvent,
   SelectionAction,
   Settings,
   StreamEvent,
@@ -65,29 +64,25 @@ const api: MarginApi = {
   },
   chat: {
     send: (input) =>
-      ipcRenderer.invoke('chat:send', input) as Promise<IpcResult<ConversationBinding | null>>,
+      ipcRenderer.invoke('chat:send', input) as Promise<IpcResult<ApiConversation | null>>,
     stop: () => ipcRenderer.invoke('chat:stop') as Promise<void>,
     messages: (projectId, before) =>
       ipcRenderer.invoke('chat:messages', projectId, before) as Promise<MessagePage>,
-    onStream: (callback) => subscribe<StreamEvent>('chat:stream', callback),
-    onScreenStatus: (callback) => subscribe<ScreenStatusEvent>('chat:screen-status', callback)
+    onStream: (callback) => subscribe<StreamEvent>('chat:stream', callback)
   },
-  deepseek: {
-    status: () => ipcRenderer.invoke('deepseek:status') as Promise<DeepSeekStatus>,
-    reconnect: (projectId) =>
-      ipcRenderer.invoke('deepseek:reconnect', projectId) as Promise<DeepSeekStatus>,
-    show: () => ipcRenderer.invoke('deepseek:show') as Promise<void>,
-    hide: () => ipcRenderer.invoke('deepseek:hide') as Promise<void>,
-    bindCurrent: (projectId) =>
-      ipcRenderer.invoke('deepseek:bind-current', projectId) as Promise<ConversationBinding>,
-    bindUrl: (projectId, url) =>
-      ipcRenderer.invoke('deepseek:bind-url', projectId, url) as Promise<ConversationBinding>,
-    diagnose: () => ipcRenderer.invoke('deepseek:diagnose') as Promise<Record<string, unknown>>,
-    keepAliveAll: () =>
-      ipcRenderer.invoke('deepseek:keep-alive') as Promise<KeepAliveResult>,
-    readLast: () =>
-      ipcRenderer.invoke('deepseek:read-last') as Promise<LastAssistantAnswer>,
-    onStatusChange: (callback) => subscribe<DeepSeekStatus>('deepseek:status-changed', callback)
+  api: {
+    providers: () => ipcRenderer.invoke('api:providers') as Promise<ApiProvider[]>,
+    saveProvider: (input) =>
+      ipcRenderer.invoke('api:save-provider', input) as Promise<ApiProvider>,
+    deleteProvider: (id) => ipcRenderer.invoke('api:delete-provider', id) as Promise<void>,
+    saveKey: (providerId, key) =>
+      ipcRenderer.invoke('api:save-key', providerId, key) as Promise<void>,
+    clearKey: (providerId) => ipcRenderer.invoke('api:clear-key', providerId) as Promise<void>,
+    test: (providerId) => ipcRenderer.invoke('api:test', providerId) as Promise<ApiTestResult>,
+    status: () => ipcRenderer.invoke('api:status') as Promise<ApiStatus>,
+    setConversation: (input) =>
+      ipcRenderer.invoke('api:set-conversation', input) as Promise<ApiConversation | null>,
+    onStatusChange: (callback) => subscribe<ApiStatus>('api:status-changed', callback)
   },
   capture: {
     start: () => ipcRenderer.invoke('capture:start') as Promise<void>,

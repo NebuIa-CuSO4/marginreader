@@ -4,7 +4,6 @@ import {
   ChevronDown,
   ChevronRight,
   ChevronUp,
-  ExternalLink,
   Languages,
   Loader2,
   MessageSquare,
@@ -12,21 +11,20 @@ import {
   PanelRightClose,
   Pin,
   PinOff,
-  RefreshCw,
   Settings,
   StickyNote,
   Upload
 } from 'lucide-react'
 import type {
+  ApiConversation,
+  ApiProvider,
+  ApiStatus,
   BootstrapData,
   ChatMessage,
-  ConversationBinding,
-  DeepSeekStatus,
   Folder,
   Note,
   NoteTypeDefinition,
   Project,
-  ScreenStatusEvent,
   SelectionAction,
   Settings as SettingsType,
   StreamEvent,
@@ -49,14 +47,9 @@ import type { ProjectUsage } from '../../shared/api'
 import { parseVocabAnswer, VOCAB_FORMAT_INSTRUCTION } from '../../shared/vocab'
 import type { FolderFilter } from './folderUtils'
 
-const EMPTY_STATUS: DeepSeekStatus = {
-  phase: 'not_started',
-  url: '',
-  externalId: null,
-  loginRequired: false,
-  composerReady: false,
-  pageTitle: '',
-  message: '尚未连接 DeepSeek 网页'
+const EMPTY_STATUS: ApiStatus = {
+  phase: 'not_configured',
+  message: '尚未配置 API'
 }
 
 type Tab = 'chat' | 'notes' | 'vocab'
@@ -67,20 +60,17 @@ interface PendingImage {
   height: number
 }
 
-function statusLabel(status: DeepSeekStatus, binding: ConversationBinding | null): string {
-  if (status.phase === 'loading') return '连接中'
+function statusLabel(status: ApiStatus): string {
+  if (status.phase === 'ready') return 'API 已连接'
   if (status.phase === 'offline') return '网络未连接'
-  if (status.phase === 'login_required') return '需登录'
-  if (status.phase === 'error') return '连接异常'
-  if (status.phase === 'ready') return binding?.status === 'connected' ? '已连接' : '未绑定对话'
-  return '未连接'
+  if (status.phase === 'error') return 'API 异常'
+  return '未配置 API'
 }
 
-function statusClass(status: DeepSeekStatus, binding: ConversationBinding | null): string {
-  if (status.phase === 'ready' && binding?.status === 'connected') return 'connected'
-  if (status.phase === 'offline' || status.phase === 'login_required') return 'warning'
+function statusClass(status: ApiStatus): string {
+  if (status.phase === 'ready') return 'connected'
+  if (status.phase === 'offline') return 'warning'
   if (status.phase === 'error') return 'error'
-  if (status.phase === 'loading') return 'loading'
   return 'idle'
 }
 
@@ -88,7 +78,8 @@ export default function App(): React.JSX.Element {
   const [booted, setBooted] = useState(false)
   const [projects, setProjects] = useState<Project[]>([])
   const [activeProjectId, setActiveProjectId] = useState('english-reading')
-  const [binding, setBinding] = useState<ConversationBinding | null>(null)
+  const [apiProviders, setApiProviders] = useState<ApiProvider[]>([])
+  const [conversation, setConversation] = useState<ApiConversation | null>(null)
   const [messages, setMessages] = useState<ChatMessage[]>([])
   const [messagesHasMore, setMessagesHasMore] = useState(false)
   const [loadingOlder, setLoadingOlder] = useState(false)
@@ -107,9 +98,7 @@ export default function App(): React.JSX.Element {
     usage: ProjectUsage
   } | null>(null)
   const [settings, setSettings] = useState<SettingsType | null>(null)
-  const [status, setStatus] = useState<DeepSeekStatus>(EMPTY_STATUS)
-  const [reconnecting, setReconnecting] = useState(false)
-  const [readIssue, setReadIssue] = useState(false)
+  const [status, setStatus] = useState<ApiStatus>(EMPTY_STATUS)
   const [windowState, setWindowState] = useState<WindowState>({
     collapsed: false,
     side: 'right',
@@ -128,26 +117,22 @@ export default function App(): React.JSX.Element {
   const [captureChoice, setCaptureChoice] = useState<PendingImage | null>(null)
   const [excerpting, setExcerpting] = useState(false)
   const excerptingRef = useRef(false)
-  const [confirmCreate, setConfirmCreate] = useState<{ text: string; imageDataUrl?: string } | null>(
-    null
-  )
 
   const activeIdRef = useRef(activeProjectId)
-  const bindingRef = useRef<ConversationBinding | null>(null)
+  const conversationRef = useRef<ApiConversation | null>(null)
   const settingsRef = useRef<SettingsType | null>(null)
   const sendingRef = useRef(false)
   const composerRef = useRef('')
   const toastTimer = useRef<number | null>(null)
   const hideTimer = useRef<number | null>(null)
-  const screenFallbackNotified = useRef(false)
   const pendingImageRef = useRef<PendingImage | null>(null)
 
   useEffect(() => {
     activeIdRef.current = activeProjectId
   }, [activeProjectId])
   useEffect(() => {
-    bindingRef.current = binding
-  }, [binding])
+    conversationRef.current = conversation
+  }, [conversation])
   useEffect(() => {
     settingsRef.current = settings
     if (settings) {
@@ -168,6 +153,10 @@ export default function App(): React.JSX.Element {
     () => projects.find((project) => project.id === activeProjectId),
     [projects, activeProjectId]
   )
+  const activeProvider = useMemo(
+    () => apiProviders.find((provider) => provider.id === conversation?.providerId) ?? null,
+    [apiProviders, conversation]
+  )
 
   function showToast(text: string, tone: 'info' | 'error' = 'info'): void {
     if (toastTimer.current) window.clearTimeout(toastTimer.current)
@@ -179,8 +168,10 @@ export default function App(): React.JSX.Element {
     setProjects(data.projects)
     setActiveProjectId(data.activeProjectId)
     activeIdRef.current = data.activeProjectId
-    setBinding(data.binding)
-    bindingRef.current = data.binding
+    setApiProviders(data.apiProviders)
+    setConversation(data.conversation)
+    conversationRef.current = data.conversation
+    setStatus(data.apiStatus)
     setMessages(data.messages)
     setMessagesHasMore(data.messagesHasMore)
     setLoadingOlder(false)
@@ -190,7 +181,6 @@ export default function App(): React.JSX.Element {
     setNoteTypes(data.noteTypes)
     setSettings(data.settings)
     settingsRef.current = data.settings
-    setStatus(data.deepseek)
     setWindowState(data.windowState)
     setBooted(true)
   }
@@ -252,17 +242,10 @@ export default function App(): React.JSX.Element {
       if (event.phase === 'delta') {
         setSending(true)
         sendingRef.current = true
-        setReadIssue(false)
       }
-      if (event.phase === 'done' || event.phase === 'stopped') {
+      if (event.phase === 'done' || event.phase === 'stopped' || event.phase === 'error') {
         setSending(false)
         sendingRef.current = false
-        setReadIssue(false)
-      }
-      if (event.phase === 'error') {
-        setSending(false)
-        sendingRef.current = false
-        setReadIssue(Boolean(event.error && /读取|回答/.test(event.error)))
       }
       if (event.phase === 'error' && event.error) showToast(event.error, 'error')
     })
@@ -299,17 +282,7 @@ export default function App(): React.JSX.Element {
       showToast('截图区域太小，可以换一个区域再试。', 'error')
     })
 
-    const offStatus = window.margin.deepseek.onStatusChange((next) => setStatus(next))
-
-    const offScreen = window.margin.chat.onScreenStatus((event: ScreenStatusEvent) => {
-      if (event.projectId !== activeIdRef.current) return
-      if (event.imageAttached) {
-        screenFallbackNotified.current = false
-      } else if (event.usedFallbackText && !screenFallbackNotified.current) {
-        screenFallbackNotified.current = true
-        showToast('网页没有接受原图，这次已改用文字发送（有 OCR 时会附带屏幕文字）。', 'error')
-      }
-    })
+    const offStatus = window.margin.api.onStatusChange((next) => setStatus(next))
 
     const offSelection = window.margin.selection.onAction((action) => {
       if (action.action === 'excerpt') {
@@ -335,8 +308,8 @@ export default function App(): React.JSX.Element {
       setComposer(sendText)
       void window.margin.window.expand(true)
       const currentSettings = settingsRef.current
-      if (currentSettings?.autoSendSelection && bindingRef.current?.status === 'connected') {
-        window.setTimeout(() => void performSend(sendText, false, action.text), 120)
+      if (currentSettings?.autoSendSelection) {
+        window.setTimeout(() => void performSend(sendText, action.text), 120)
       }
     })
 
@@ -345,7 +318,6 @@ export default function App(): React.JSX.Element {
       offState()
       offCapture()
       offStatus()
-      offScreen()
       offSelection()
     }
   }, [])
@@ -358,19 +330,18 @@ export default function App(): React.JSX.Element {
     pendingImageRef.current = null
     setTab('chat')
     setProjectsOpen(false)
-    screenFallbackNotified.current = false
   }
 
   async function performSend(
     text: string,
-    createIfMissing: boolean,
     displayText?: string,
     imageDataUrl?: string
   ): Promise<void> {
     const clean = text.trim() || (imageDataUrl ? '请看这张截图。' : '')
     if (!clean || sendingRef.current) return
-    if (!bindingRef.current && !createIfMissing) {
-      setConfirmCreate({ text: clean, imageDataUrl })
+    if (!conversationRef.current || status.phase === 'not_configured') {
+      showToast('请先在设置中配置 API、密钥和模型。', 'error')
+      setSettingsOpen(true)
       return
     }
     const assistantId = crypto.randomUUID()
@@ -382,6 +353,7 @@ export default function App(): React.JSX.Element {
       {
         id: userId,
         projectId: activeIdRef.current,
+        conversationId: conversationRef.current?.id,
         role: 'user',
         content: shownText,
         status: 'sending',
@@ -390,6 +362,7 @@ export default function App(): React.JSX.Element {
       {
         id: assistantId,
         projectId: activeIdRef.current,
+        conversationId: conversationRef.current?.id,
         role: 'assistant',
         content: '',
         reasoning: '',
@@ -400,7 +373,6 @@ export default function App(): React.JSX.Element {
     setComposer('')
     setSending(true)
     sendingRef.current = true
-    setReadIssue(false)
     setTab('chat')
     try {
       const result = await window.margin.chat.send({
@@ -408,43 +380,18 @@ export default function App(): React.JSX.Element {
         text: clean,
         displayText: shownText,
         assistantId,
-        createIfMissing,
         imageDataUrl
       })
       if (!result.ok) {
-        const neverSent = new Set([
-          'NETWORK_OFFLINE',
-          'COMPOSER_NOT_FOUND',
-          'LOGIN_REQUIRED',
-          'URL_MISMATCH',
-          'NO_BINDING',
-          'BINDING_INVALID',
-          'INVALID_URL'
-        ])
-        if (result.code && neverSent.has(result.code)) {
-          setMessages((previous) =>
-            previous.filter((message) => message.id !== userId && message.id !== assistantId)
-          )
-          setComposer((current) => current || text)
-          if (result.code === 'NETWORK_OFFLINE') {
-            setStatus((previous) => ({
-              ...previous,
-              phase: 'offline',
-              composerReady: false,
-              message: '网络未连接，请检查网络后点击“重连”。'
-            }))
-          }
-        } else {
-          setMessages((previous) =>
-            previous.map((message) => {
-              if (message.id === userId) return { ...message, status: 'error' }
-              if (message.id === assistantId) {
-                return { ...message, status: 'error', content: result.error ?? '发送失败' }
-              }
-              return message
-            })
-          )
-        }
+        setMessages((previous) =>
+          previous.map((message) => {
+            if (message.id === userId) return { ...message, status: 'complete' }
+            if (message.id === assistantId) {
+              return { ...message, status: 'error', content: result.error ?? '发送失败' }
+            }
+            return message
+          })
+        )
         setSending(false)
         sendingRef.current = false
         showToast(result.error ?? '发送失败', 'error')
@@ -460,17 +407,14 @@ export default function App(): React.JSX.Element {
         pendingImageRef.current = null
       }
       if (result.data) {
-        setBinding(result.data)
-        bindingRef.current = result.data
-        if (result.data.status === 'unbound') {
-          showToast('消息已发出，但未能捕获对话 ID。请打开网页并绑定当前对话。', 'error')
-        }
+        setConversation(result.data)
+        conversationRef.current = result.data
       }
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error)
       setMessages((previous) =>
         previous.map((item) => {
-          if (item.id === userId) return { ...item, status: 'error' }
+          if (item.id === userId) return { ...item, status: 'complete' }
           if (item.id === assistantId) return { ...item, status: 'error', content: message }
           return item
         })
@@ -486,11 +430,7 @@ export default function App(): React.JSX.Element {
     const imageDataUrl = pendingImageRef.current?.dataUrl
     if (!text && !imageDataUrl) return
     const sendText = text || '请看这张截图。'
-    if (!bindingRef.current) {
-      setConfirmCreate({ text: sendText, imageDataUrl })
-      return
-    }
-    void performSend(sendText, false, undefined, imageDataUrl)
+    void performSend(sendText, undefined, imageDataUrl)
   }
 
   async function stopGeneration(): Promise<void> {
@@ -502,32 +442,6 @@ export default function App(): React.JSX.Element {
         sendingRef.current = false
       }
     }, 1800)
-  }
-
-  async function recoverLastAnswer(assistantId: string): Promise<void> {
-    try {
-      const result = await window.margin.deepseek.readLast()
-      if (!result.text.trim()) {
-        showToast('网页里还没有可读取的回答。请打开网页面板确认。', 'error')
-        return
-      }
-      setMessages((previous) =>
-        previous.map((message) =>
-          message.id === assistantId
-            ? {
-                ...message,
-                content: result.text,
-                reasoning: result.reasoning || message.reasoning,
-                status: 'complete'
-              }
-            : message
-        )
-      )
-      setReadIssue(false)
-      showToast('已从网页读取最后一条回答')
-    } catch (error) {
-      showToast(error instanceof Error ? error.message : String(error), 'error')
-    }
   }
 
   async function loadOlderMessages(): Promise<void> {
@@ -558,7 +472,7 @@ export default function App(): React.JSX.Element {
     excerptingRef.current = true
     setExcerpting(true)
     void window.margin.window.expand(true)
-    showToast('正在让 DeepSeek 逐字整理摘抄…')
+    showToast('正在让模型逐字整理摘抄…')
     try {
       const result = await window.margin.excerpt.run({
         projectId: activeIdRef.current,
@@ -577,26 +491,6 @@ export default function App(): React.JSX.Element {
     } finally {
       excerptingRef.current = false
       setExcerpting(false)
-    }
-  }
-
-  async function reconnectDeepSeek(): Promise<void> {
-    if (reconnecting) return
-    setReconnecting(true)
-    try {
-      const next = await window.margin.deepseek.reconnect(activeIdRef.current)
-      setStatus(next)
-      if (next.phase === 'ready') {
-        showToast('DeepSeek 已重新连接')
-      } else if (next.phase === 'offline') {
-        showToast('网络仍未连接，请检查网络', 'error')
-      } else {
-        showToast(next.message || '重新连接失败', 'error')
-      }
-    } catch (error) {
-      showToast(error instanceof Error ? error.message : String(error), 'error')
-    } finally {
-      setReconnecting(false)
     }
   }
 
@@ -747,21 +641,7 @@ export default function App(): React.JSX.Element {
     await window.margin.app.deleteProject(projectId)
     const data = await window.margin.app.activateProject('english-reading')
     applyBootstrap(data)
-    showToast('项目已删除，网页对话未受影响')
-  }
-
-  async function bindCurrent(): Promise<void> {
-    const result = await window.margin.deepseek.bindCurrent(activeIdRef.current)
-    setBinding(result)
-    bindingRef.current = result
-    showToast('已绑定当前网页对话')
-  }
-
-  async function bindUrl(url: string): Promise<void> {
-    const result = await window.margin.deepseek.bindUrl(activeIdRef.current, url)
-    setBinding(result)
-    bindingRef.current = result
-    showToast('已绑定对话链接')
+    showToast('项目及其本地对话已删除')
   }
 
   async function updateSettings(patch: Partial<SettingsType>): Promise<void> {
@@ -775,6 +655,36 @@ export default function App(): React.JSX.Element {
     if (path) showToast(`已导出到 ${path}`)
   }
 
+  async function refreshApiConfig(): Promise<void> {
+    const providers = await window.margin.api.providers()
+    setApiProviders(providers)
+    const data = await window.margin.app.bootstrap()
+    setConversation(data.conversation)
+    conversationRef.current = data.conversation
+    setStatus(data.apiStatus)
+    setSettings(data.settings)
+    settingsRef.current = data.settings
+  }
+
+  async function changeConversationApi(input: {
+    providerId?: string
+    model?: string
+  }): Promise<void> {
+    try {
+      const next = await window.margin.api.setConversation({
+        projectId: activeIdRef.current,
+        ...input
+      })
+      if (next) {
+        setConversation(next)
+        conversationRef.current = next
+      }
+      setStatus(await window.margin.api.status())
+    } catch (error) {
+      showToast(error instanceof Error ? error.message : String(error), 'error')
+    }
+  }
+
   function scheduleAutoHide(): void {
     if (!settingsRef.current?.autoHide || settingsRef.current.pinned) return
     if (
@@ -782,7 +692,6 @@ export default function App(): React.JSX.Element {
       settingsOpen ||
       noteDraft ||
       vocabDraft ||
-      confirmCreate ||
       captureChoice ||
       noteView
     ) {
@@ -841,8 +750,8 @@ export default function App(): React.JSX.Element {
     )
   }
 
-  const currentStatusLabel = readIssue ? '读取异常' : statusLabel(status, binding)
-  const currentStatusClass = readIssue ? 'error' : statusClass(status, binding)
+  const currentStatusLabel = statusLabel(status)
+  const currentStatusClass = statusClass(status)
   const shortcut = settings.selectionShortcut.replace('CommandOrControl', 'Ctrl')
 
   return (
@@ -884,30 +793,26 @@ export default function App(): React.JSX.Element {
         </button>
         <button
           className={`status-chip ${currentStatusClass}`}
-          title={readIssue ? '网页已连接，但回答读取失败。可以打开设置里的“诊断”，或打开网页面板确认。' : status.message}
-          onClick={() => {
-            if (readIssue) setSettingsOpen(true)
-            else if (status.phase === 'ready') setProjectsOpen(true)
-            else void window.margin.deepseek.show()
-          }}
+          title={status.message}
+          onClick={() => setSettingsOpen(true)}
         >
           <span className="status-dot" />
           {currentStatusLabel}
         </button>
-        {(status.phase === 'offline' || status.phase === 'error' || readIssue) && (
-          <button
-            className="reconnect-button"
-            title="重新连接 DeepSeek"
-            disabled={reconnecting}
-            onClick={() => void reconnectDeepSeek()}
+        {activeProvider && activeProvider.models.length > 0 && (
+          <select
+            className="model-select"
+            value={conversation?.model || activeProvider.defaultModel}
+            onChange={(event) => void changeConversationApi({ model: event.target.value })}
+            title="选择当前对话模型"
           >
-            <RefreshCw size={13} className={reconnecting ? 'spin' : ''} />
-            {reconnecting ? '重连中' : '重连'}
-          </button>
+            {activeProvider.models.map((model) => (
+              <option key={model} value={model}>
+                {model}
+              </option>
+            ))}
+          </select>
         )}
-        <button className="icon-button small" title="打开 DeepSeek 网页" onClick={() => void window.margin.deepseek.show()}>
-          <ExternalLink size={14} />
-        </button>
       </div>
 
       <nav className="tabs">
@@ -937,7 +842,7 @@ export default function App(): React.JSX.Element {
             onLoadOlder={loadOlderMessages}
             sending={sending}
             composer={composer}
-            hasBinding={Boolean(binding?.externalId)}
+            apiReady={status.phase === 'ready'}
             pendingImage={pendingImage}
             onRemoveImage={() => {
               setPendingImage(null)
@@ -948,15 +853,13 @@ export default function App(): React.JSX.Element {
             onStop={() => void stopGeneration()}
             onCapture={() => void window.margin.capture.start()}
             onSelectionHelp={() => showToast(`在任意应用中选中文字后按 ${shortcut}`)}
-            onRecoverAnswer={(assistantId) => void recoverLastAnswer(assistantId)}
-            onOpenWeb={() => void window.margin.deepseek.show()}
             onSaveVocabAnswer={(answer, question) => saveVocabFromAnswer(answer, question)}
             onSaveAnswer={(content) =>
               setNoteDraft({
                 initial: {
                   title: '来自对话的笔记',
                   content,
-                  source: binding?.url ?? '',
+                  source: conversation ? `${activeProvider?.name ?? 'API'} · ${conversation.model}` : '',
                   notebook: activeProject?.kind === 'english' ? '英语阅读' : '文献笔记'
                 }
               })
@@ -1122,14 +1025,16 @@ export default function App(): React.JSX.Element {
         <ProjectsModal
           projects={projects}
           activeProjectId={activeProjectId}
-          binding={binding}
+          provider={activeProvider}
+          model={conversation?.model ?? ''}
           status={status}
           onActivate={switchProject}
           onCreate={createProject}
           onDelete={requestDeleteProject}
-          onBindCurrent={bindCurrent}
-          onBindUrl={bindUrl}
-          onOpenWeb={() => void window.margin.deepseek.show()}
+          onOpenSettings={() => {
+            setProjectsOpen(false)
+            setSettingsOpen(true)
+          }}
           onClose={() => setProjectsOpen(false)}
         />
       )}
@@ -1148,10 +1053,12 @@ export default function App(): React.JSX.Element {
       {settingsOpen && (
         <SettingsModal
           settings={settings}
+          providers={apiProviders}
           status={status}
+          conversation={conversation}
           onChange={updateSettings}
-          onOpenWeb={() => void window.margin.deepseek.show()}
-          onHideWeb={() => void window.margin.deepseek.hide()}
+          onRefresh={refreshApiConfig}
+          onConversationChange={changeConversationApi}
           onExport={exportData}
           onClose={() => setSettingsOpen(false)}
         />
@@ -1159,7 +1066,7 @@ export default function App(): React.JSX.Element {
       {captureChoice && (
         <Modal
           title="截图已截取"
-          subtitle="选择“摘抄”让 DeepSeek 逐字整理成笔记，或先上传到会话再自己提问。"
+          subtitle="选择“摘抄”让模型逐字整理成笔记，或先上传到会话再自己提问。"
           onClose={() => setCaptureChoice(null)}
         >
           <div className="capture-choice-preview">
@@ -1202,35 +1109,6 @@ export default function App(): React.JSX.Element {
             >
               {excerpting ? <Loader2 size={14} className="spin" /> : <NotebookPen size={14} />}
               摘抄
-            </button>
-          </div>
-        </Modal>
-      )}
-      {confirmCreate && (
-        <Modal
-          title="创建这个项目的网页对话？"
-          subtitle="之后这个项目会一直复用同一条 DeepSeek 网页对话。"
-          onClose={() => setConfirmCreate(null)}
-        >
-          <p className="confirm-copy">
-            {activeProject?.kind === 'english'
-              ? '英语阅读的所有文章会共用这条对话。'
-              : `《${activeProject?.title ?? '当前项目'}》将绑定一条新的 DeepSeek 网页对话。`}
-          </p>
-          <div className="modal-actions">
-            <button className="ghost-button" onClick={() => setConfirmCreate(null)}>
-              取消
-            </button>
-            <button
-              className="primary-button"
-              onClick={() => {
-                const text = confirmCreate.text
-                const imageDataUrl = confirmCreate.imageDataUrl
-                setConfirmCreate(null)
-                void performSend(text, true, undefined, imageDataUrl)
-              }}
-            >
-              创建并发送
             </button>
           </div>
         </Modal>

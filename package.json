@@ -1,8 +1,8 @@
 {
   "name": "margin-reader",
-  "version": "0.1.33",
+  "version": "0.2.0",
   "private": true,
-  "description": "页边 Margin — Windows 阅读伴读侧栏",
+  "description": "页边 Margin — Windows 阅读伴读侧栏（API 对话版）",
   "main": "./out/main/index.js",
   "author": "Margin",
   "license": "MIT",

@@ -1,8 +1,11 @@
 import { DatabaseSync } from 'node:sqlite'
 import { randomUUID } from 'node:crypto'
 import type {
+  ApiConversation,
+  ApiProvider,
+  ApiProviderKind,
+  ApiUsage,
   ChatMessage,
-  ConversationBinding,
   Folder,
   FolderKind,
   MessageStatus,
@@ -27,7 +30,9 @@ const DEFAULT_SETTINGS: Settings = {
   autoScreenContext: true,
   launchAtLogin: false,
   activeProjectId: 'english-reading',
-  onboardingDone: false
+  onboardingDone: false,
+  defaultProviderId: 'deepseek',
+  defaultModel: 'deepseek-chat'
 }
 
 function now(): number {
@@ -69,14 +74,41 @@ export class AppDatabase {
         updated_at INTEGER NOT NULL
       );
 
+      CREATE TABLE IF NOT EXISTS api_providers (
+        id TEXT PRIMARY KEY,
+        name TEXT NOT NULL,
+        kind TEXT NOT NULL DEFAULT 'openai-compatible',
+        base_url TEXT NOT NULL,
+        models TEXT NOT NULL DEFAULT '[]',
+        default_model TEXT NOT NULL DEFAULT '',
+        supports_vision INTEGER NOT NULL DEFAULT 0,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL
+      );
+
+      CREATE TABLE IF NOT EXISTS conversations (
+        id TEXT PRIMARY KEY,
+        project_id TEXT NOT NULL UNIQUE REFERENCES projects(id) ON DELETE CASCADE,
+        provider_id TEXT NOT NULL,
+        model TEXT NOT NULL DEFAULT '',
+        title TEXT NOT NULL DEFAULT '',
+        source TEXT NOT NULL DEFAULT 'api',
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_conversations_project ON conversations(project_id);
+
       CREATE TABLE IF NOT EXISTS messages (
         id TEXT PRIMARY KEY,
         project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+        conversation_id TEXT,
         role TEXT NOT NULL,
         content TEXT NOT NULL DEFAULT '',
         reasoning TEXT NOT NULL DEFAULT '',
         status TEXT NOT NULL DEFAULT 'complete',
-        created_at INTEGER NOT NULL
+        created_at INTEGER NOT NULL,
+        model TEXT NOT NULL DEFAULT '',
+        usage TEXT NOT NULL DEFAULT ''
       );
       CREATE INDEX IF NOT EXISTS idx_messages_project ON messages(project_id, created_at);
 
@@ -145,6 +177,18 @@ export class AppDatabase {
     if (!messageColumns.some((column) => column.name === 'reasoning')) {
       this.db.exec("ALTER TABLE messages ADD COLUMN reasoning TEXT NOT NULL DEFAULT ''")
     }
+    if (!messageColumns.some((column) => column.name === 'conversation_id')) {
+      this.db.exec('ALTER TABLE messages ADD COLUMN conversation_id TEXT')
+    }
+    if (!messageColumns.some((column) => column.name === 'model')) {
+      this.db.exec("ALTER TABLE messages ADD COLUMN model TEXT NOT NULL DEFAULT ''")
+    }
+    if (!messageColumns.some((column) => column.name === 'usage')) {
+      this.db.exec("ALTER TABLE messages ADD COLUMN usage TEXT NOT NULL DEFAULT ''")
+    }
+    this.db.exec(
+      'CREATE INDEX IF NOT EXISTS idx_messages_conversation ON messages(conversation_id, created_at)'
+    )
 
     const noteColumns = this.db.prepare('PRAGMA table_info(notes)').all() as unknown as Array<{
       name: string
@@ -165,6 +209,72 @@ export class AppDatabase {
       CREATE INDEX IF NOT EXISTS idx_notes_folder ON notes(folder_id, updated_at);
       CREATE INDEX IF NOT EXISTS idx_vocab_folder ON vocab(folder_id, updated_at);
     `)
+
+    const providerCount = Number(
+      (this.db.prepare('SELECT COUNT(*) AS count FROM api_providers').get() as { count: number })
+        .count ?? 0
+    )
+    if (providerCount === 0) {
+      this.db
+        .prepare(
+          `INSERT INTO api_providers
+             (id, name, kind, base_url, models, default_model, supports_vision, created_at, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, 0, ?, ?)`
+        )
+        .run(
+          'deepseek',
+          'DeepSeek',
+          'deepseek',
+          'https://api.deepseek.com',
+          JSON.stringify(['deepseek-chat', 'deepseek-reasoner']),
+          'deepseek-chat',
+          now(),
+          now()
+        )
+    }
+
+    const migrationSettings = this.getSettings()
+    const projects = this.listProjects()
+    const conversationInsert = this.db.prepare(
+      `INSERT INTO conversations
+         (id, project_id, provider_id, model, title, source, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+    )
+    for (const project of projects) {
+      const existing = this.db
+        .prepare('SELECT id FROM conversations WHERE project_id = ?')
+        .get(project.id) as { id: string } | undefined
+      if (existing) continue
+      const legacy = this.db
+        .prepare('SELECT project_id FROM conversation_bindings WHERE project_id = ?')
+        .get(project.id)
+      const provider = this.getApiProvider(migrationSettings.defaultProviderId)
+      const providerId = provider?.id ?? 'deepseek'
+      const model =
+        migrationSettings.defaultModel ||
+        provider?.defaultModel ||
+        provider?.models[0] ||
+        'deepseek-chat'
+      conversationInsert.run(
+        randomUUID(),
+        project.id,
+        providerId,
+        model,
+        project.title,
+        legacy ? 'migrated-web' : 'api',
+        project.createdAt,
+        now()
+      )
+    }
+    this.db
+      .prepare(
+        `UPDATE messages
+         SET conversation_id = (
+           SELECT conversations.id FROM conversations WHERE conversations.project_id = messages.project_id
+         )
+         WHERE conversation_id IS NULL`
+      )
+      .run()
 
     const typeCount = Number(
       (this.db.prepare('SELECT COUNT(*) AS count FROM note_types').get() as { count: number }).count ?? 0
@@ -223,6 +333,17 @@ export class AppDatabase {
         .prepare('INSERT INTO projects (id, kind, title, author, created_at) VALUES (?, ?, ?, ?, ?)')
         .run('english-reading', 'english', '英语阅读', '', now())
     }
+    const englishProject = this.getProject('english-reading')
+    if (englishProject) this.ensureConversation(englishProject)
+    this.db
+      .prepare(
+        `UPDATE messages
+         SET conversation_id = (
+           SELECT conversations.id FROM conversations WHERE conversations.project_id = messages.project_id
+         )
+         WHERE conversation_id IS NULL`
+      )
+      .run()
 
     const active = this.db.prepare('SELECT value FROM settings WHERE key = ?').get('app')
     if (!active) {
@@ -239,11 +360,27 @@ export class AppDatabase {
   }
 
   listProjects(): Project[] {
-    return this.db.prepare('SELECT * FROM projects ORDER BY kind = ? DESC, created_at ASC').all('english') as unknown as Project[]
+    const rows = this.db
+      .prepare('SELECT * FROM projects ORDER BY kind = ? DESC, created_at ASC')
+      .all('english') as unknown as Array<Record<string, unknown>>
+    return rows.map((row) => this.mapProject(row))
   }
 
   getProject(id: string): Project | null {
-    return (this.db.prepare('SELECT * FROM projects WHERE id = ?').get(id) as unknown as Project) ?? null
+    const row = this.db.prepare('SELECT * FROM projects WHERE id = ?').get(id) as
+      | Record<string, unknown>
+      | undefined
+    return row ? this.mapProject(row) : null
+  }
+
+  private mapProject(row: Record<string, unknown>): Project {
+    return {
+      id: String(row.id),
+      kind: String(row.kind) as ProjectKind,
+      title: String(row.title),
+      author: String(row.author ?? ''),
+      createdAt: Number(row.created_at)
+    }
   }
 
   createProject(kind: ProjectKind, title: string, author = ''): Project {
@@ -257,6 +394,7 @@ export class AppDatabase {
     this.db
       .prepare('INSERT INTO projects (id, kind, title, author, created_at) VALUES (?, ?, ?, ?, ?)')
       .run(project.id, project.kind, project.title, project.author, project.createdAt)
+    this.ensureConversation(project)
     return project
   }
 
@@ -265,108 +403,187 @@ export class AppDatabase {
     this.db.prepare('DELETE FROM projects WHERE id = ?').run(id)
   }
 
-  getBinding(projectId: string): ConversationBinding | null {
-    const row = this.db.prepare('SELECT * FROM conversation_bindings WHERE project_id = ?').get(projectId) as
-      | Record<string, unknown>
-      | undefined
+  listApiProviders(): ApiProvider[] {
+    const rows = this.db
+      .prepare('SELECT * FROM api_providers ORDER BY created_at ASC')
+      .all() as unknown as Array<Record<string, unknown>>
+    return rows.map((row) => ({
+      id: String(row.id),
+      name: String(row.name),
+      kind: String(row.kind) as ApiProviderKind,
+      baseUrl: String(row.base_url),
+      models: parseJson<string[]>(String(row.models ?? '[]'), []),
+      defaultModel: String(row.default_model ?? ''),
+      supportsVision: Number(row.supports_vision) === 1,
+      hasKey: false,
+      createdAt: Number(row.created_at),
+      updatedAt: Number(row.updated_at)
+    }))
+  }
+
+  getApiProvider(id: string): ApiProvider | null {
+    return this.listApiProviders().find((provider) => provider.id === id) ?? null
+  }
+
+  saveApiProvider(input: Partial<ApiProvider> & { id: string; name: string; baseUrl: string }): ApiProvider {
+    const existing = this.getApiProvider(input.id)
+    const models = input.models ?? existing?.models ?? []
+    const provider: ApiProvider = {
+      id: input.id,
+      name: input.name.trim() || 'API',
+      kind: input.kind ?? existing?.kind ?? 'openai-compatible',
+      baseUrl: input.baseUrl.trim().replace(/\/+$/, ''),
+      models,
+      defaultModel:
+        input.defaultModel?.trim() || existing?.defaultModel || models[0] || '',
+      supportsVision: input.supportsVision ?? existing?.supportsVision ?? false,
+      hasKey: false,
+      createdAt: existing?.createdAt ?? now(),
+      updatedAt: now()
+    }
+    this.db
+      .prepare(
+        `INSERT INTO api_providers
+           (id, name, kind, base_url, models, default_model, supports_vision, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT(id) DO UPDATE SET
+           name = excluded.name,
+           kind = excluded.kind,
+           base_url = excluded.base_url,
+           models = excluded.models,
+           default_model = excluded.default_model,
+           supports_vision = excluded.supports_vision,
+           updated_at = excluded.updated_at`
+      )
+      .run(
+        provider.id,
+        provider.name,
+        provider.kind,
+        provider.baseUrl,
+        JSON.stringify(provider.models),
+        provider.defaultModel,
+        provider.supportsVision ? 1 : 0,
+        provider.createdAt,
+        provider.updatedAt
+      )
+    return provider
+  }
+
+  deleteApiProvider(id: string): void {
+    this.db.prepare('DELETE FROM api_providers WHERE id = ?').run(id)
+  }
+
+  ensureConversation(project: Project, source: ApiConversation['source'] = 'api'): ApiConversation {
+    const existing = this.getConversation(project.id)
+    if (existing) return existing
+    const settings = this.getSettings()
+    const provider =
+      this.getApiProvider(settings.defaultProviderId) ?? this.listApiProviders()[0] ?? null
+    const providerId = provider?.id ?? 'deepseek'
+    const model =
+      settings.defaultModel || provider?.defaultModel || provider?.models[0] || 'deepseek-chat'
+    const id = randomUUID()
+    this.db
+      .prepare(
+        `INSERT INTO conversations
+           (id, project_id, provider_id, model, title, source, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+      )
+      .run(id, project.id, providerId, model, project.title, source, project.createdAt, now())
+    return {
+      id,
+      projectId: project.id,
+      providerId,
+      model,
+      title: project.title,
+      source,
+      createdAt: project.createdAt,
+      updatedAt: now()
+    }
+  }
+
+  getConversation(projectId: string): ApiConversation | null {
+    const row = this.db
+      .prepare('SELECT * FROM conversations WHERE project_id = ?')
+      .get(projectId) as Record<string, unknown> | undefined
     if (!row) return null
     return {
+      id: String(row.id),
       projectId: String(row.project_id),
-      provider: 'deepseek-web',
-      externalId: row.external_id ? String(row.external_id) : null,
-      url: row.url ? String(row.url) : null,
-      status: String(row.status) as ConversationBinding['status'],
+      providerId: String(row.provider_id),
+      model: String(row.model ?? ''),
+      title: String(row.title ?? ''),
+      source: String(row.source) as ApiConversation['source'],
+      createdAt: Number(row.created_at),
       updatedAt: Number(row.updated_at)
     }
   }
 
-  listBindingsByActivity(): ConversationBinding[] {
-    const rows = this.db
-      .prepare(
-        `SELECT cb.*,
-           COALESCE(
-             (SELECT MAX(m.created_at) FROM messages m WHERE m.project_id = cb.project_id),
-             cb.updated_at
-           ) AS activity
-         FROM conversation_bindings cb
-         WHERE cb.external_id IS NOT NULL AND cb.external_id <> ''
-           AND cb.url IS NOT NULL AND cb.url <> ''
-         ORDER BY activity DESC, cb.updated_at DESC`
-      )
-      .all() as unknown as Array<Record<string, unknown>>
-    return rows.map((row) => ({
-      projectId: String(row.project_id),
-      provider: 'deepseek-web',
-      externalId: row.external_id ? String(row.external_id) : null,
-      url: row.url ? String(row.url) : null,
-      status: String(row.status) as ConversationBinding['status'],
-      updatedAt: Number(row.updated_at)
-    }))
-  }
-
-  listBindings(): ConversationBinding[] {
-    const rows = this.db
-      .prepare(
-        `SELECT * FROM conversation_bindings
-         WHERE external_id IS NOT NULL AND external_id <> '' AND url IS NOT NULL AND url <> ''
-         ORDER BY updated_at ASC`
-      )
-      .all() as unknown as Array<Record<string, unknown>>
-    return rows.map((row) => ({
-      projectId: String(row.project_id),
-      provider: 'deepseek-web',
-      externalId: row.external_id ? String(row.external_id) : null,
-      url: row.url ? String(row.url) : null,
-      status: String(row.status) as ConversationBinding['status'],
-      updatedAt: Number(row.updated_at)
-    }))
-  }
-
-  upsertBinding(binding: ConversationBinding): void {
+  updateConversation(
+    projectId: string,
+    patch: Partial<Pick<ApiConversation, 'providerId' | 'model' | 'title'>>
+  ): ApiConversation | null {
+    const existing = this.getConversation(projectId)
+    if (!existing) return null
     this.db
       .prepare(
-        `INSERT INTO conversation_bindings (project_id, provider, external_id, url, status, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?)
-         ON CONFLICT(project_id) DO UPDATE SET
-           provider = excluded.provider,
-           external_id = excluded.external_id,
-           url = excluded.url,
-           status = excluded.status,
-           updated_at = excluded.updated_at`
+        `UPDATE conversations
+         SET provider_id = ?, model = ?, title = ?, updated_at = ?
+         WHERE project_id = ?`
       )
       .run(
-        binding.projectId,
-        binding.provider,
-        binding.externalId,
-        binding.url,
-        binding.status,
-        binding.updatedAt
+        patch.providerId ?? existing.providerId,
+        patch.model ?? existing.model,
+        patch.title ?? existing.title,
+        now(),
+        projectId
       )
+    return this.getConversation(projectId)
   }
 
-  updateBindingStatus(projectId: string, status: ConversationBinding['status'], url?: string): void {
-    const existing = this.getBinding(projectId)
-    if (!existing) return
-    this.upsertBinding({ ...existing, status, url: url ?? existing.url, updatedAt: now() })
+  listContextMessages(projectId: string): ChatMessage[] {
+    const rows = this.db
+      .prepare(
+        `SELECT * FROM messages
+         WHERE project_id = ? AND status = 'complete'
+           AND role IN ('user', 'assistant')
+           AND TRIM(content) <> ''
+         ORDER BY created_at ASC, id ASC`
+      )
+      .all(projectId) as unknown as Array<Record<string, unknown>>
+    const messages = rows.map((row) => this.mapMessage(row))
+    const context: ChatMessage[] = []
+    for (let index = 0; index < messages.length; index += 1) {
+      const message = messages[index]
+      if (message.role !== 'user') continue
+      const answer = messages[index + 1]
+      if (!answer || answer.role !== 'assistant') continue
+      context.push(message, answer)
+      index += 1
+    }
+    return context
   }
 
-  deleteBinding(projectId: string): void {
-    this.db.prepare('DELETE FROM conversation_bindings WHERE project_id = ?').run(projectId)
+  private mapMessage(row: Record<string, unknown>): ChatMessage {
+    return {
+      id: String(row.id),
+      projectId: String(row.project_id),
+      conversationId: row.conversation_id ? String(row.conversation_id) : undefined,
+      role: String(row.role) as ChatMessage['role'],
+      content: String(row.content ?? ''),
+      reasoning: String(row.reasoning ?? ''),
+      status: String(row.status) as ChatMessage['status'],
+      createdAt: Number(row.created_at),
+      model: row.model ? String(row.model) : undefined,
+      usage: parseJson<ApiUsage | undefined>(String(row.usage ?? ''), undefined)
+    }
   }
 
   listMessages(projectId: string): ChatMessage[] {
     const rows = this.db
       .prepare('SELECT * FROM messages WHERE project_id = ? ORDER BY created_at ASC')
       .all(projectId) as unknown as Array<Record<string, unknown>>
-    return rows.map((row) => ({
-      id: String(row.id),
-      projectId: String(row.project_id),
-      role: String(row.role) as ChatMessage['role'],
-      content: String(row.content ?? ''),
-      reasoning: String(row.reasoning ?? ''),
-      status: String(row.status) as ChatMessage['status'],
-      createdAt: Number(row.created_at)
-    }))
+    return rows.map((row) => this.mapMessage(row))
   }
 
   listMessagePage(
@@ -403,15 +620,7 @@ export class AppDatabase {
     ).reverse()
     const hasMore = rows.length > pageSize
     const pageRows = hasMore ? rows.slice(1) : rows
-    const messages = pageRows.map((row) => ({
-      id: String(row.id),
-      projectId: String(row.project_id),
-      role: String(row.role) as ChatMessage['role'],
-      content: String(row.content ?? ''),
-      reasoning: String(row.reasoning ?? ''),
-      status: String(row.status) as ChatMessage['status'],
-      createdAt: Number(row.created_at)
-    }))
+    const messages = pageRows.map((row) => this.mapMessage(row))
     return {
       messages,
       hasMore,
@@ -424,16 +633,21 @@ export class AppDatabase {
   addMessage(message: ChatMessage): void {
     this.db
       .prepare(
-        'INSERT INTO messages (id, project_id, role, content, reasoning, status, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)'
+        `INSERT INTO messages
+           (id, project_id, conversation_id, role, content, reasoning, status, created_at, model, usage)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
       )
       .run(
         message.id,
         message.projectId,
+        message.conversationId ?? this.getConversation(message.projectId)?.id ?? null,
         message.role,
         message.content,
         message.reasoning ?? '',
         message.status,
-        message.createdAt
+        message.createdAt,
+        message.model ?? '',
+        message.usage ? JSON.stringify(message.usage) : ''
       )
   }
 
@@ -441,55 +655,26 @@ export class AppDatabase {
     id: string,
     content: string,
     status: MessageStatus,
-    reasoning = ''
+    reasoning = '',
+    usage?: ApiUsage,
+    model?: string
   ): void {
     this.db
-      .prepare('UPDATE messages SET content = ?, reasoning = ?, status = ? WHERE id = ?')
-      .run(content, reasoning, status, id)
+      .prepare(
+        'UPDATE messages SET content = ?, reasoning = ?, status = ?, usage = ?, model = ? WHERE id = ?'
+      )
+      .run(
+        content,
+        reasoning,
+        status,
+        usage ? JSON.stringify(usage) : '',
+        model ?? '',
+        id
+      )
   }
 
   deleteMessage(id: string): void {
     this.db.prepare('DELETE FROM messages WHERE id = ?').run(id)
-  }
-
-  /**
-   * Older versions persisted a local user/assistant pair even when the web page
-   * was offline or had no composer. Those messages were never sent to DeepSeek;
-   * remove only the known pre-send failures, not genuine read/send failures.
-   */
-  deleteUnsentFailures(): number {
-    const rows = this.db
-      .prepare(
-        `SELECT id, project_id, role, content, status, created_at
-         FROM messages ORDER BY project_id ASC, created_at ASC, id ASC`
-      )
-      .all() as unknown as Array<Record<string, unknown>>
-    const patterns = [
-      /找不到 DeepSeek 输入框/,
-      /网页里没有找到输入框/,
-      /网络未连接/,
-      /当前网页对话与项目绑定的对话不一致/
-    ]
-    const remove = new Set<string>()
-    for (let index = 0; index < rows.length; index += 1) {
-      const row = rows[index]
-      if (String(row.role) !== 'assistant' || String(row.status) !== 'error') continue
-      const content = String(row.content ?? '')
-      if (!patterns.some((pattern) => pattern.test(content))) continue
-      remove.add(String(row.id))
-      const previous = rows[index - 1]
-      if (
-        previous &&
-        String(previous.role) === 'user' &&
-        String(previous.project_id) === String(row.project_id)
-      ) {
-        remove.add(String(previous.id))
-      }
-    }
-    if (remove.size === 0) return 0
-    const statement = this.db.prepare('DELETE FROM messages WHERE id = ?')
-    for (const id of remove) statement.run(id)
-    return remove.size
   }
 
   clearMessages(projectId: string): void {
@@ -994,8 +1179,9 @@ export class AppDatabase {
     return {
       exportedAt: new Date().toISOString(),
       projects: this.listProjects(),
-      bindings: this.listProjects()
-        .map((project) => this.getBinding(project.id))
+      apiProviders: this.listApiProviders().map(({ hasKey: _hasKey, ...provider }) => provider),
+      conversations: this.listProjects()
+        .map((project) => this.getConversation(project.id))
         .filter(Boolean),
       messages: this.listProjects().flatMap((project) => this.listMessages(project.id)),
       notes: this.listProjects().flatMap((project) => this.listNotes(project.id)),
