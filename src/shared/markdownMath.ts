@@ -61,32 +61,20 @@ function looksLikeBareLatex(value: string): boolean {
   return hasRelation && !hasProseWord && (hasScript || /[0-9]/.test(text))
 }
 
-function wrapBareLatexLines(text: string): string {
-  const lines = text.split(/\r?\n/)
-  const out: string[] = []
-  let inDisplayMath = false
-  for (const line of lines) {
-    const trimmed = line.trim()
-    const displayTokens = trimmed.match(/\$\$/g)?.length ?? 0
-    if (displayTokens > 0) {
-      if (displayTokens % 2 === 1) inDisplayMath = !inDisplayMath
-      out.push(line)
-      continue
-    }
-    if (inDisplayMath || !trimmed || trimmed.startsWith('$')) {
-      out.push(line)
-      continue
-    }
-    if (looksLikeBareLatex(trimmed)) {
-      out.push('$$', repairMalformedLatex(stripStrayDelimiters(trimmed)), '$$')
-      continue
-    }
-    out.push(line)
-  }
-  return out.join('\n')
-}
-
 const CODE_UI_LABEL = /^(复制|下载|复制代码|下载代码|Copy|Download)(?:\s+(复制|下载|复制代码|下载代码|Copy|Download))*$/i
+
+/** Lines that start a Markdown block and must never be treated as bare LaTeX. */
+const BLOCK_MARKER = /^(#{1,6}\s|>|\s*[-*+]\s|\s*\d+[.)]\s|\||```|~~~|<|!?\[|>>|\$\$)/
+
+/** Environments that are valid inside [ ... ] (already in display math). */
+const MATH_ENV = /^\s*\\(?:begin|end)\{(?:matrix|bmatrix|pmatrix|vmatrix|Vmatrix|smallmatrix|cases|array|aligned|gathered|split|align|alignedat|dcases|rcases)(?:\*)?\}/
+
+/** Prose, list, table or code lines are never converted into display math. */
+function isProseLine(trimmed: string): boolean {
+  if (BLOCK_MARKER.test(trimmed)) return true
+  if (/[\u3400-\u9fff]/.test(trimmed)) return true
+  return false
+}
 
 function stripCodeToolbarLabels(text: string): string {
   return text
@@ -100,25 +88,79 @@ function stripCodeToolbarLabels(text: string): string {
  * remark-math understands $ / $$, so normalize outside code fences.
  */
 export function normalizeMathMarkdown(markdown: string): string {
-  const parts = markdown.split(CODE_SPLIT)
-  return parts
-    .map((part, index) => {
-      if (index % 2 === 1) return part
-      let text = stripCodeToolbarLabels(part)
-      // Some copied answers contain double-escaped delimiters (\\( ... \\)).
-      text = text.replace(/\\{2,}(?=[()[\]])/g, '\\')
-      text = text.replace(/\\\[([\s\S]*?)\\\]/g, (_match, body: string) => `\n$$\n${body.trim()}\n$$\n`)
-      text = text.replace(/\\\(([\s\S]*?)\\\)/g, (_match, body: string) => `$${body.trim()}$`)
-      text = text.replace(
-        /\\begin\{equation\*?\}([\s\S]*?)\\end\{equation\*?\}/g,
-        (_match, body: string) => `\n$$\n${body.trim()}\n$$\n`
-      )
-      text = text
-        .replace(/\\begin\{(align|align\*|eqnarray|eqnarray\*)\}/g, '\\begin{aligned}')
-        .replace(/\\end\{(align|align\*|eqnarray|eqnarray\*)\}/g, '\\end{aligned}')
-        .replace(/\\begin\{(gather|gather\*)\}/g, '\\begin{gathered}')
-        .replace(/\\end\{(gather|gather\*)\}/g, '\\end{gathered}')
-      return wrapBareLatexLines(text)
-    })
+  // Protect inline code spans, fences and already-written $$...$$ math so no
+  // delimiter rewriting can ever corrupt them.
+  const tokens: string[] = []
+  const protect = (value: string): string => {
+    tokens.push(value)
+    return `\u0000${tokens.length - 1}\u0000`
+  }
+  let text = markdown
+    .replace(/```[\s\S]*?```|~~~[\s\S]*?~~~/g, (match) => protect(match))
+    .replace(/`[^`\n]*`/g, (match) => protect(match))
+    .replace(/\$\$[\s\S]*?\$\$/g, (match) => protect(match))
+
+  text = stripCodeToolbarLabels(text)
+  // Some copied answers contain double-escaped delimiters (\\( ... \\)).
+  text = text.replace(/\\{2,}(?=[()[\]])/g, '\\')
+  text = text.replace(/\\\[([\s\S]*?)\\\]/g, (_match, body: string) => `\n$$\n${body.trim()}\n$$\n`)
+  text = text.replace(/\\\(([\s\S]*?)\\\)/g, (match, body: string) => `$${body.trim()}$`)
+  text = text.replace(
+    /\\begin\{equation\*?\}([\s\S]*?)\\end\{equation\*?\}/g,
+    (match, body: string) => `\n$$\n${body.trim()}\n$$\n`
+  )
+  // Convert bare LaTeX lines before rewriting environments, otherwise an
+  // alignment block would be mistaken for an escaped \\[ delimiter.
+  const protectedNow = text.split(/(\u0000\d+\u0000)/)
+  text = protectedNow
+    .map((part) => (/^\u0000\d+\u0000$/.test(part) ? part : wrapBareLatexLinesSafe(part)))
     .join('')
+
+  text = text
+    .replace(/\\begin\{(align|align\*|eqnarray|eqnarray\*)\}/g, '\\begin{aligned}')
+    .replace(/\\end\{(align|align\*|eqnarray|eqnarray\*)\}/g, '\\end{aligned}')
+    .replace(/\\begin\{(gather|gather\*)\}/g, '\\begin{gathered}')
+    .replace(/\\end\{(gather|gather\*)\}/g, '\\end{gathered}')
+
+  return text.replace(/\u0000(\d+)\u0000/g, (_match, index: string) => tokens[Number(index)] ?? '')
+}
+
+function wrapBareLatexLinesSafe(text: string): string {
+  const lines = text.split(/\r?\n/)
+  const out: string[] = []
+  let inDisplayMath = false
+  let mathDepth = 0
+  for (const line of lines) {
+    const trimmed = line.trim()
+    const displayTokens = trimmed.match(/\$\$/g)?.length ?? 0
+    if (displayTokens > 0) {
+      if (displayTokens % 2 === 1) inDisplayMath = !inDisplayMath
+      out.push(line)
+      continue
+    }
+    if (MATH_ENV.test(trimmed)) {
+      // Environments such as \begin{aligned} only ever live inside a math block.
+      if (/\\begin\{/.test(trimmed)) mathDepth += 1
+      if (/\\end\{/.test(trimmed)) mathDepth = Math.max(0, mathDepth - 1)
+      continue
+    }
+    if (
+      inDisplayMath ||
+      mathDepth > 0 ||
+      !trimmed ||
+      trimmed.startsWith('$') ||
+      isProseLine(trimmed) ||
+      !looksLikeBareLatex(trimmed)
+    ) {
+      out.push(line)
+      continue
+    }
+    const indent = line.slice(0, line.length - line.trimStart().length)
+    out.push(
+      `${indent}$$`,
+      `${indent}${repairMalformedLatex(stripStrayDelimiters(trimmed))}`,
+      `${indent}$$`
+    )
+  }
+  return out.join('\n')
 }
