@@ -57,13 +57,24 @@ export function InspectorPage({ projectId }: { projectId: string }): React.JSX.E
   }, [projectId])
 
   useEffect(() => {
+    let timer: number | null = null
+    const schedule = (): void => {
+      if (timer) return
+      timer = window.setTimeout(() => {
+        timer = null
+        void load()
+      }, 600)
+    }
     const off = window.margin.chat.onStream((event) => {
       if (event.projectId !== projectId) return
       if (event.phase === 'done' || event.phase === 'error' || event.phase === 'stopped') {
-        void load()
+        schedule()
       }
     })
-    return off
+    return () => {
+      if (timer) window.clearTimeout(timer)
+      off()
+    }
   }, [projectId])
 
   useEffect(() => {

@@ -511,7 +511,7 @@ function registerIpc(): void {
           conversationId: conversation.id,
           role: 'user',
           content: displayText,
-          status: 'complete',
+          status: 'sending',
           createdAt: Date.now(),
           model: conversation.model
         }
@@ -557,6 +557,7 @@ function registerIpc(): void {
               emitDelta()
             }
           )
+          db.updateMessage(userMessage.id, displayText, 'complete')
           db.updateMessage(
             assistantId,
             result.content,
@@ -577,6 +578,7 @@ function registerIpc(): void {
         } catch (error) {
           const apiError = error instanceof ApiError ? error : null
           if (apiError?.code === 'API_ABORTED') {
+            db.updateMessage(userMessage.id, displayText, 'complete')
             db.updateMessage(assistantId, content, 'interrupted', reasoning)
             sendToRenderer('chat:stream', {
               projectId: input.projectId,
@@ -589,6 +591,7 @@ function registerIpc(): void {
           }
           const message = error instanceof Error ? error.message : String(error)
           const code = apiError?.code ?? 'API_ERROR'
+          db.updateMessage(userMessage.id, displayText, content ? 'complete' : 'error')
           db.updateMessage(assistantId, content || message, 'error', reasoning)
           sendToRenderer('chat:stream', {
             projectId: input.projectId,
