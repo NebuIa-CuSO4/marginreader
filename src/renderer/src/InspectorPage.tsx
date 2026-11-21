@@ -6,6 +6,7 @@ import type {
   ConversationInspection,
   RequestPart
 } from '../../shared/types'
+import { MarkdownPlain } from './components/Markdown'
 
 type Tab = 'requests' | 'transcript'
 
@@ -43,7 +44,7 @@ function outcomeLabel(outcome: ChatRequestLog['outcome']): string {
 }
 
 function RequestPartView({ part, onImage }: { part: RequestPart; onImage: (url: string) => void }): React.JSX.Element {
-  if (part.type === 'text') return <pre className="inspector-text">{part.text}</pre>
+  if (part.type === 'text') return <MarkdownPlain content={part.text} />
   return (
     <div className="inspector-image">
       <span className="inspector-image-label">图片内容 · {part.description}</span>
@@ -65,6 +66,7 @@ export function InspectorPage({ projectId }: { projectId: string }): React.JSX.E
   const [selectedId, setSelectedId] = useState<string | null>(null)
   const [preview, setPreview] = useState<string | null>(null)
   const detailRef = useRef<HTMLDivElement>(null)
+  const transcriptRef = useRef<HTMLDivElement>(null)
 
   async function load(): Promise<void> {
     setError('')
@@ -110,13 +112,25 @@ export function InspectorPage({ projectId }: { projectId: string }): React.JSX.E
   }, [projectId])
 
   useEffect(() => {
-    detailRef.current?.scrollTo({ top: 0 })
+    const panel = detailRef.current
+    if (!panel) return
+    const frame = requestAnimationFrame(() => {
+      panel.scrollTop = panel.scrollHeight
+    })
+    return () => cancelAnimationFrame(frame)
   }, [selectedId])
 
-  const selected = useMemo(
-    () => data?.logs.find((log) => log.requestId === selectedId) ?? null,
-    [data, selectedId]
-  )
+  useEffect(() => {
+    if (tab !== 'transcript') return
+    const panel = transcriptRef.current
+    if (!panel) return
+    const frame = requestAnimationFrame(() => {
+      panel.scrollTop = panel.scrollHeight
+    })
+    return () => cancelAnimationFrame(frame)
+  }, [tab, data])
+
+  const selected = useMemo(() => data?.logs.find((log) => log.requestId === selectedId) ?? null, [data, selectedId])
 
   const latestTime = useMemo(() => {
     const last = data?.messages[data.messages.length - 1]
@@ -281,7 +295,7 @@ export function InspectorPage({ projectId }: { projectId: string }): React.JSX.E
                             <span>#{index + 1}</span>
                           </div>
                           {message.text !== undefined ? (
-                            <pre className="inspector-text">{message.text}</pre>
+                            <MarkdownPlain content={message.text} />
                           ) : (
                             (message.parts ?? []).map((part, partIndex) => (
                               <RequestPartView
@@ -330,7 +344,7 @@ export function InspectorPage({ projectId }: { projectId: string }): React.JSX.E
                 <div className="inspector-note">
                   本地数据库中的完整会话记录（含失败 / 停止）。请求实际发送内容请查看“实际请求”。
                 </div>
-                <div className="inspector-transcript">
+                <div className="inspector-transcript" ref={transcriptRef}>
                   {data.messages.length === 0 ? (
                     <div className="inspector-empty">这个项目还没有消息。</div>
                   ) : (
@@ -352,7 +366,11 @@ export function InspectorPage({ projectId }: { projectId: string }): React.JSX.E
                             </span>
                           )}
                         </div>
-                        <pre className="inspector-text">{message.content || '（空消息）'}</pre>
+                        {message.content ? (
+                          <MarkdownPlain content={message.content} />
+                        ) : (
+                          <pre className="inspector-text">（空消息）</pre>
+                        )}
                       </article>
                     ))
                   )}

@@ -175,6 +175,7 @@ export function buildRequest(
   let imageOmitted = false
   let ocrApplied = false
   if (image && !provider.supportsVision) {
+    // Text-only model: the picture itself cannot travel, so fall back to OCR text.
     if (ocrText.trim()) {
       apiText = `${apiText}\n\n【截图文字】\n${ocrText.trim()}`
       ocrApplied = true
@@ -182,6 +183,10 @@ export function buildRequest(
       imageOmitted = true
     }
     image = ''
+  } else if (image) {
+    // Vision model: send the real image only. Do not append OCR text as well,
+    // otherwise the model receives the same content twice.
+    ocrApplied = false
   }
   const messages = buildRequestMessages(projectTitle, history, apiText, image, provider.supportsVision)
   const log = {

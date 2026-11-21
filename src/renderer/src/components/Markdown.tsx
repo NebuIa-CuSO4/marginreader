@@ -110,7 +110,13 @@ function CodeBlock({ children }: { children?: ReactNode }): React.JSX.Element {
   )
 }
 
-function MarkdownBase({ content }: { content: string }): React.JSX.Element {
+function MarkdownBase({
+  content,
+  withCodeToolbar = true
+}: {
+  content: string
+  withCodeToolbar?: boolean
+}): React.JSX.Element {
   const rootRef = useRef<HTMLDivElement>(null)
 
   useEffect(() => {
@@ -143,7 +149,8 @@ function MarkdownBase({ content }: { content: string }): React.JSX.Element {
           [rehypeKatex, { throwOnError: false, strict: false, errorColor: 'currentColor' }]
         ]}
         components={{
-          pre: ({ children }) => <CodeBlock>{children}</CodeBlock>,
+          pre: ({ children }) =>
+            withCodeToolbar ? <CodeBlock>{children}</CodeBlock> : <pre>{children}</pre>,
           table: ({ children }) => (
             <div className="table-wrap">
               <table>{children}</table>
@@ -163,3 +170,12 @@ function MarkdownBase({ content }: { content: string }): React.JSX.Element {
 }
 
 export const Markdown = memo(MarkdownBase)
+
+/** Read-only rendering for the request inspector: no code toolbar, KaTeX enabled. */
+export const MarkdownPlain = memo(function MarkdownPlain({
+  content
+}: {
+  content: string
+}): React.JSX.Element {
+  return <MarkdownBase content={content} withCodeToolbar={false} />
+})

@@ -435,17 +435,18 @@ function registerIpc(): void {
         if (!imageForRequest && db.getSettings().autoScreenContext) {
           const screen = await capture.captureForContext()
           imageForRequest = screen.imageDataUrl ?? ''
-          const screenText = screen.text.trim()
-          if (screenText) {
-            baseText = `【屏幕上下文｜自动读取】\n${screenText}\n\n【我的问题】\n${text}`
+          if (!provider.supportsVision && screen.text.trim()) {
+            // Text-only model: screen text is all we can send.
+            baseText = `【屏幕上下文｜自动读取】\n${screen.text.trim()}\n\n【我的问题】\n${text}`
           } else if (screen.error) {
             debug(`auto screen context failed: ${screen.error}`)
           }
         }
-        let ocrText = ''
-        if (imageForRequest && !provider.supportsVision) {
-          ocrText = await capture.ocrDataUrl(imageForRequest)
-        }
+        // Only run OCR when the model cannot take the picture itself.
+        const ocrText =
+          imageForRequest && !provider.supportsVision
+            ? await capture.ocrDataUrl(imageForRequest)
+            : ''
         const requestId = newRequestId()
         const { built, log } = buildRequest(
           input.projectId,
@@ -456,7 +457,7 @@ function registerIpc(): void {
           baseText,
           displayText,
           imageForRequest,
-          { applied: baseText !== text, image: imageForRequest },
+          { applied: provider.supportsVision && baseText !== text, image: imageForRequest },
           ocrText,
           { id: provider.id, name: provider.name, supportsVision: provider.supportsVision },
           model
