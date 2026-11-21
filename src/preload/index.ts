@@ -74,6 +74,8 @@ const api: MarginApi = {
       ipcRenderer.invoke('chat:inspect', projectId) as Promise<ConversationInspection>,
     openInspector: (projectId) =>
       ipcRenderer.invoke('chat:open-inspector', projectId) as Promise<void>,
+    readRequestLogImage: (requestId, fileName) =>
+      ipcRenderer.invoke('chat:request-log-image', requestId, fileName) as Promise<string | null>,
     onStream: (callback) => subscribe<StreamEvent>('chat:stream', callback)
   },
   api: {

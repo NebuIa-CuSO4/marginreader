@@ -170,12 +170,49 @@ export interface BootstrapData {
   windowState: WindowState
 }
 
+export type RequestPart =
+  | { type: 'text'; text: string }
+  | { type: 'image_url'; imageUrl: string; description: string }
+
+export interface ChatRequestLog {
+  requestId: string
+  projectId: string
+  assistantId: string
+  createdAt: number
+  provider: string
+  providerId: string
+  model: string
+  supportsVision: boolean
+  displayText: string
+  apiText: string
+  screenContextApplied: boolean
+  imageAttached: boolean
+  imageOmitted: boolean
+  ocrApplied: boolean
+  trim: {
+    historyCount: number
+    sentMessageCount: number
+    charLimit: number
+    messageLimit: number
+  }
+  request: Array<{ role: 'system' | 'user' | 'assistant'; text?: string; parts?: RequestPart[] }>
+  images: string[]
+  logId?: string
+  outcome?: 'done' | 'stopped' | 'error'
+  answer?: string
+  reasoning?: string
+  error?: string
+  code?: string
+  usage?: ApiUsage | null
+  finishReason?: string | null
+}
+
 export interface ConversationInspection {
   project: Project
   conversation: ApiConversation | null
   provider: ApiProvider | null
   messages: ChatMessage[]
-  context: Array<{ role: 'system' | 'user' | 'assistant'; content: string }>
+  systemPrompt: string
   stats: {
     total: number
     user: number
@@ -186,7 +223,14 @@ export interface ConversationInspection {
     other: number
   }
   mismatched: number
+  logs: ChatRequestLog[]
+  logLimit: number
   theme: Settings['theme']
+}
+
+export interface RequestLogFile {
+  fileName: string
+  dataUrl: string
 }
 
 export interface CaptureResult {

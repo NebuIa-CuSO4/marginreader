@@ -21,6 +21,7 @@ import type {
   ApiStatus,
   BootstrapData,
   ChatMessage,
+  ChatRequestLog,
   ConversationInspection,
   IpcResult,
   Note,
@@ -39,7 +40,14 @@ import type {
 import { AppDatabase } from './database'
 import { getDatabasePath, getPreload, getRendererFile, getResource, getTempDir } from './paths'
 import { WindowManager } from './windowManager'
-import { stripVocabBlock } from '../shared/vocab'
+import {
+  buildRequest,
+  describeRequest,
+  newRequestId,
+  readRequestLogs,
+  systemPrompt,
+  writeRequestLog
+} from './requestLog'
 import { ApiError, streamChat, testApiProvider } from './apiClient'
 import type { ApiMessage } from './apiClient'
 import {
@@ -60,6 +68,11 @@ let isQuitting = false
 let activeRequest: { projectId: string; assistantId: string; controller: AbortController } | null =
   null
 let inspectorWindow: BrowserWindow | null = null
+const REQUEST_LOG_LIMIT = 60
+
+function getRequestLogDir(): string {
+  return path.join(app.getPath('userData'), 'request-logs')
+}
 const debugFile = process.env.MARGIN_DEBUG
   ? path.join(process.cwd(), 'margin-debug.log')
   : null
@@ -185,53 +198,6 @@ function applyLaunchAtLogin(enabled: boolean): void {
   }
 }
 
-function systemPrompt(projectTitle: string): string {
-  return `你是页边（Margin），一个中文阅读与学习助手。当前项目：《${projectTitle}》。回答准确、清晰，优先使用 Markdown；数学公式使用 LaTeX。`
-}
-
-function trimContext(messages: ChatMessage[]): ChatMessage[] {
-  const recent = messages.slice(-60)
-  let chars = 0
-  const kept: ChatMessage[] = []
-  for (let index = recent.length - 1; index >= 0; index -= 1) {
-    const message = recent[index]
-    chars += message.content.length
-    if (kept.length >= 2 && chars > 70_000) break
-    kept.unshift(message)
-  }
-  return kept
-}
-
-function historyMessages(
-  projectTitle: string,
-  messages: ChatMessage[],
-  currentUser: string,
-  imageDataUrl: string,
-  supportsVision: boolean
-): ApiMessage[] {
-  const result: ApiMessage[] = [
-    { role: 'system', content: systemPrompt(projectTitle) }
-  ]
-  trimContext(messages).forEach((message) => {
-    if (message.role !== 'user' && message.role !== 'assistant') return
-    result.push({
-      role: message.role,
-      content: message.role === 'assistant' ? stripVocabBlock(message.content) : message.content
-    })
-  })
-  result.push({
-    role: 'user',
-    content:
-      imageDataUrl && supportsVision
-        ? [
-            { type: 'text', text: currentUser },
-            { type: 'image_url', image_url: { url: imageDataUrl } }
-          ]
-        : currentUser
-  })
-  return result
-}
-
 async function projectApiContext(projectId: string): Promise<{
   project: NonNullable<ReturnType<AppDatabase['getProject']>>
   conversation: ApiConversation
@@ -263,14 +229,6 @@ async function inspectConversation(projectId: string): Promise<ConversationInspe
     ? { ...providerRecord, hasKey: await hasApiKey(providerRecord.id) }
     : null
   const messages = db.listMessages(projectId)
-  const contextMessages = db.listContextMessages(projectId)
-  const context: ConversationInspection['context'] = [
-    { role: 'system', content: systemPrompt(project.title) },
-    ...trimContext(contextMessages).map((message) => ({
-      role: message.role as 'user' | 'assistant',
-      content: message.role === 'assistant' ? stripVocabBlock(message.content) : message.content
-    }))
-  ]
   const stats = {
     total: messages.length,
     user: messages.filter((message) => message.role === 'user').length,
@@ -290,9 +248,11 @@ async function inspectConversation(projectId: string): Promise<ConversationInspe
     conversation,
     provider,
     messages,
-    context,
+    systemPrompt: systemPrompt(project.title),
     stats,
     mismatched,
+    logs: await readRequestLogs(getRequestLogDir(), REQUEST_LOG_LIMIT),
+    logLimit: REQUEST_LOG_LIMIT,
     theme: db.getSettings().theme
   }
 }
@@ -469,42 +429,47 @@ function registerIpc(): void {
         }
         const assistantId = input.assistantId || randomUUID()
         const displayText = input.displayText?.trim() || text
-        let apiText = text
-        let imageDataUrl = input.imageDataUrl ?? ''
-        let screenText = ''
-        if (!imageDataUrl && db.getSettings().autoScreenContext) {
+        const model = conversation.model || provider.defaultModel
+        let baseText = text
+        let imageForRequest = input.imageDataUrl ?? ''
+        if (!imageForRequest && db.getSettings().autoScreenContext) {
           const screen = await capture.captureForContext()
-          imageDataUrl = screen.imageDataUrl
-          screenText = screen.text.trim()
+          imageForRequest = screen.imageDataUrl ?? ''
+          const screenText = screen.text.trim()
           if (screenText) {
-            apiText = `【屏幕上下文｜自动读取】\n${screenText}\n\n【我的问题】\n${text}`
+            baseText = `【屏幕上下文｜自动读取】\n${screenText}\n\n【我的问题】\n${text}`
           } else if (screen.error) {
             debug(`auto screen context failed: ${screen.error}`)
           }
         }
-        if (imageDataUrl && !provider.supportsVision) {
-          if (!screenText) {
-            const ocr = await capture.ocrDataUrl(imageDataUrl)
-            if (!ocr.trim()) {
-              return {
-                ok: false,
-                code: 'API_VISION_UNSUPPORTED',
-                error: '当前 API 模型不支持图片，且没有识别出截图文字。'
-              }
-            }
-            apiText = `${apiText}\n\n【截图文字】\n${ocr.trim()}`
-          }
-          imageDataUrl = ''
+        let ocrText = ''
+        if (imageForRequest && !provider.supportsVision) {
+          ocrText = await capture.ocrDataUrl(imageForRequest)
         }
-
-        const history = db.listContextMessages(input.projectId)
-        const apiMessages = historyMessages(
+        const requestId = newRequestId()
+        const { built, log } = buildRequest(
+          input.projectId,
+          assistantId,
+          requestId,
           project.title,
-          history,
-          apiText,
-          imageDataUrl,
-          provider.supportsVision
+          db.listContextMessages(input.projectId),
+          baseText,
+          displayText,
+          imageForRequest,
+          { applied: baseText !== text, image: imageForRequest },
+          ocrText,
+          { id: provider.id, name: provider.name, supportsVision: provider.supportsVision },
+          model
         )
+        if (built.imageOmitted) {
+          await writeRequestLog(getRequestLogDir(), { ...log, error: '模型不支持图片，且 OCR 没有识别出文字' })
+          return {
+            ok: false,
+            code: 'API_VISION_UNSUPPORTED',
+            error: '当前 API 模型不支持图片，且没有识别出截图文字。'
+          }
+        }
+        const apiMessages = built.messages
         const userMessage: ChatMessage = {
           id: randomUUID(),
           projectId: input.projectId,
@@ -532,6 +497,29 @@ function registerIpc(): void {
         activeRequest = { projectId: input.projectId, assistantId, controller }
         let content = ''
         let reasoning = ''
+        let requestLog: ChatRequestLog = { ...log }
+        try {
+          requestLog = await writeRequestLog(getRequestLogDir(), { ...log })
+        } catch (error) {
+          debug(`request log failed: ${error instanceof Error ? error.message : String(error)}`)
+        }
+        const finishLog = async (
+          outcome: 'done' | 'stopped' | 'error',
+          extra: Record<string, unknown> = {}
+        ): Promise<void> => {
+          try {
+            await writeRequestLog(getRequestLogDir(), {
+              ...log,
+              logId: requestLog.requestId,
+              outcome,
+              answer: content,
+              reasoning,
+              ...extra
+            })
+          } catch (error) {
+            debug(`request log update failed: ${error instanceof Error ? error.message : String(error)}`)
+          }
+        }
         const emitDelta = (): void => {
           sendToRenderer('chat:stream', {
             projectId: input.projectId,
@@ -564,8 +552,9 @@ function registerIpc(): void {
             'complete',
             result.reasoning,
             result.usage ?? undefined,
-            conversation.model
+            model
           )
+          await finishLog('done', { usage: result.usage, finishReason: result.finishReason })
           sendToRenderer('chat:stream', {
             projectId: input.projectId,
             assistantId,
@@ -580,6 +569,7 @@ function registerIpc(): void {
           if (apiError?.code === 'API_ABORTED') {
             db.updateMessage(userMessage.id, displayText, 'complete')
             db.updateMessage(assistantId, content, 'interrupted', reasoning)
+            await finishLog('stopped')
             sendToRenderer('chat:stream', {
               projectId: input.projectId,
               assistantId,
@@ -593,6 +583,7 @@ function registerIpc(): void {
           const code = apiError?.code ?? 'API_ERROR'
           db.updateMessage(userMessage.id, displayText, content ? 'complete' : 'error')
           db.updateMessage(assistantId, content || message, 'error', reasoning)
+          await finishLog('error', { error: message, code })
           sendToRenderer('chat:stream', {
             projectId: input.projectId,
             assistantId,
@@ -619,6 +610,19 @@ function registerIpc(): void {
   })
 
   ipcMain.handle('chat:inspect', (_event, projectId: string) => inspectConversation(projectId))
+  ipcMain.handle('chat:request-log-image', async (_event, requestId: string, fileName: string) => {
+    if (!/^[\w.:-]+$/.test(requestId) || !/^[\w.:-]+\.(png|jpe?g|webp|gif)$/i.test(fileName)) {
+      return null
+    }
+    try {
+      const file = path.join(getRequestLogDir(), `${requestId}-${fileName}`)
+      const data = await fs.readFile(file)
+      const ext = path.extname(fileName).slice(1).toLowerCase()
+      return `data:image/${ext === 'jpg' ? 'jpeg' : ext};base64,${data.toString('base64')}`
+    } catch {
+      return null
+    }
+  })
   ipcMain.handle('chat:open-inspector', (_event, projectId: string) =>
     openInspectorWindow(projectId)
   )
@@ -778,10 +782,40 @@ function registerIpc(): void {
       }
     ]
     const controller = new AbortController()
+    const model = conversation.model || provider.defaultModel
+    const requestId = newRequestId()
+    try {
+      await writeRequestLog(getRequestLogDir(), {
+        requestId,
+        projectId: input.projectId,
+        assistantId: 'excerpt',
+        createdAt: Date.now(),
+        provider: provider.name,
+        providerId: provider.id,
+        model,
+        supportsVision: provider.supportsVision,
+        displayText: text || '（截图摘抄）',
+        apiText: prompt,
+        screenContextApplied: false,
+        imageAttached: Boolean(imageDataUrl),
+        imageOmitted: false,
+        ocrApplied: Boolean(input.imageDataUrl) && Boolean(prompt.includes('【截图文字】')),
+        trim: {
+          historyCount: 0,
+          sentMessageCount: apiMessages.length,
+          charLimit: 0,
+          messageLimit: 0
+        },
+        request: describeRequest(apiMessages),
+        images: imageDataUrl ? [imageDataUrl] : []
+      })
+    } catch (error) {
+      debug(`excerpt request log failed: ${error instanceof Error ? error.message : String(error)}`)
+    }
     const transcript = await streamChat(
       provider,
       apiKey,
-      conversation.model || provider.defaultModel,
+      model,
       apiMessages,
       controller.signal,
       () => undefined,

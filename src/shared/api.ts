@@ -95,6 +95,7 @@ export interface MarginApi {
     messages: (projectId: string, before?: MessageCursor) => Promise<MessagePage>
     inspect: (projectId: string) => Promise<ConversationInspection>
     openInspector: (projectId: string) => Promise<void>
+    readRequestLogImage: (requestId: string, fileName: string) => Promise<string | null>
     onStream: (callback: (event: StreamEvent) => void) => () => void
   }
   api: {

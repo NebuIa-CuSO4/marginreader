@@ -1,8 +1,13 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { Check, ClipboardCopy, RefreshCw, X } from 'lucide-react'
-import type { ChatMessage, ConversationInspection } from '../../shared/types'
+import type {
+  ChatMessage,
+  ChatRequestLog,
+  ConversationInspection,
+  RequestPart
+} from '../../shared/types'
 
-type Tab = 'transcript' | 'context'
+type Tab = 'requests' | 'transcript'
 
 function formatTime(value: number): string {
   return new Date(value).toLocaleString('zh-CN', {
@@ -30,13 +35,36 @@ function statusClass(status: ChatMessage['status']): string {
   return 'pending'
 }
 
+function outcomeLabel(outcome: ChatRequestLog['outcome']): string {
+  if (outcome === 'done') return '成功'
+  if (outcome === 'error') return '失败'
+  if (outcome === 'stopped') return '已停止'
+  return '进行中'
+}
+
+function RequestPartView({ part, onImage }: { part: RequestPart; onImage: (url: string) => void }): React.JSX.Element {
+  if (part.type === 'text') return <pre className="inspector-text">{part.text}</pre>
+  return (
+    <div className="inspector-image">
+      <span className="inspector-image-label">图片内容 · {part.description}</span>
+      {part.imageUrl && (
+        <button className="ghost-button" onClick={() => onImage(part.imageUrl)}>
+          查看原图
+        </button>
+      )}
+    </div>
+  )
+}
+
 export function InspectorPage({ projectId }: { projectId: string }): React.JSX.Element {
   const [data, setData] = useState<ConversationInspection | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
-  const [tab, setTab] = useState<Tab>('transcript')
+  const [tab, setTab] = useState<Tab>('requests')
   const [copied, setCopied] = useState(false)
-  const scrollRef = useRef<HTMLDivElement>(null)
+  const [selectedId, setSelectedId] = useState<string | null>(null)
+  const [preview, setPreview] = useState<string | null>(null)
+  const detailRef = useRef<HTMLDivElement>(null)
 
   async function load(): Promise<void> {
     setError('')
@@ -44,7 +72,11 @@ export function InspectorPage({ projectId }: { projectId: string }): React.JSX.E
       const next = await window.margin.chat.inspect(projectId)
       setData(next)
       document.documentElement.dataset.theme = next.theme
-      document.title = `页边 · ${next.project.title} · 本地会话`
+      document.title = `页边 · ${next.project.title} · 实际发送记录`
+      setSelectedId((current) => {
+        if (current && next.logs.some((log) => log.requestId === current)) return current
+        return next.logs[0]?.requestId ?? null
+      })
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err))
     } finally {
@@ -78,14 +110,17 @@ export function InspectorPage({ projectId }: { projectId: string }): React.JSX.E
   }, [projectId])
 
   useEffect(() => {
-    if (scrollRef.current) {
-      scrollRef.current.scrollTop = scrollRef.current.scrollHeight
-    }
-  }, [data, tab])
+    detailRef.current?.scrollTo({ top: 0 })
+  }, [selectedId])
+
+  const selected = useMemo(
+    () => data?.logs.find((log) => log.requestId === selectedId) ?? null,
+    [data, selectedId]
+  )
 
   const latestTime = useMemo(() => {
     const last = data?.messages[data.messages.length - 1]
-    return last?.createdAt ?? data?.conversation?.updatedAt ?? 0
+    return last?.createdAt ?? 0
   }, [data])
 
   async function copyConversationId(): Promise<void> {
@@ -95,11 +130,16 @@ export function InspectorPage({ projectId }: { projectId: string }): React.JSX.E
     setTimeout(() => setCopied(false), 1500)
   }
 
+  async function openLogImage(log: ChatRequestLog, fileName: string): Promise<void> {
+    const url = await window.margin.chat.readRequestLogImage(log.requestId, fileName)
+    if (url) setPreview(url)
+  }
+
   return (
     <div className="inspector-shell">
       <header className="inspector-header">
         <div>
-          <span className="inspector-kicker">本地真实会话 · 只读</span>
+          <span className="inspector-kicker">实际发送给 API 的请求 · 只读</span>
           <h1>{data?.project.title ?? '本地会话'}</h1>
           <p>
             {data?.provider?.name ?? '未配置 API'}
@@ -149,8 +189,10 @@ export function InspectorPage({ projectId }: { projectId: string }): React.JSX.E
                   <strong>{data.provider?.hasKey ? '已配置' : '未配置'}</strong>
                 </div>
                 <div>
-                  <span>消息总数</span>
-                  <strong>{data.stats.total}</strong>
+                  <span>请求记录</span>
+                  <strong>
+                    {data.logs.length} / {data.logLimit}
+                  </strong>
                 </div>
               </div>
               <div className="inspector-stats">
@@ -168,72 +210,164 @@ export function InspectorPage({ projectId }: { projectId: string }): React.JSX.E
             </section>
 
             <div className="inspector-tabs">
+              <button className={tab === 'requests' ? 'active' : ''} onClick={() => setTab('requests')}>
+                实际请求（{data.logs.length}）
+              </button>
               <button className={tab === 'transcript' ? 'active' : ''} onClick={() => setTab('transcript')}>
                 完整会话（{data.messages.length}）
               </button>
-              <button className={tab === 'context' ? 'active' : ''} onClick={() => setTab('context')}>
-                下一次请求上下文（{data.context.length}）
-              </button>
             </div>
 
-            {tab === 'transcript' ? (
-              <div className="inspector-note">
-                按本地数据库原始顺序显示，底部为最新。这里包含全部消息（包括失败、停止），用于核对保存结果；实际发给 API 的上下文见上方标签。
+            {tab === 'requests' ? (
+              <div className="inspector-split">
+                <div className="inspector-log-list">
+                  {data.logs.length === 0 ? (
+                    <div className="inspector-empty">
+                      这个项目还没有 0.2.3 之后的请求记录。发送一条新消息后会出现。
+                    </div>
+                  ) : (
+                    data.logs.map((log) => (
+                      <button
+                        key={log.requestId}
+                        className={`inspector-log-item ${log.requestId === selectedId ? 'active' : ''}`}
+                        onClick={() => setSelectedId(log.requestId)}
+                      >
+                        <div className="inspector-log-top">
+                          <span className={`inspector-badge ${log.outcome ?? 'pending'}`}>
+                            {outcomeLabel(log.outcome)}
+                          </span>
+                          <span>{formatTime(log.createdAt)}</span>
+                        </div>
+                        <p>{log.displayText.slice(0, 90) || '（无文字）'}</p>
+                        <span className="inspector-log-meta">
+                          {log.model} · {log.request.length} 条消息
+                          {log.imageAttached ? ' · 含图片' : ''}
+                          {log.ocrApplied ? ' · OCR' : ''}
+                          {log.screenContextApplied ? ' · 屏幕上下文' : ''}
+                        </span>
+                      </button>
+                    ))
+                  )}
+                </div>
+                <div className="inspector-log-detail" ref={detailRef}>
+                  {!selected ? (
+                    <div className="inspector-empty">选择左侧的一条请求查看完整内容。</div>
+                  ) : (
+                    <>
+                      <div className="inspector-detail-head">
+                        <strong>{formatTime(selected.createdAt)}</strong>
+                        <span className={`inspector-badge ${selected.outcome ?? 'pending'}`}>
+                          {outcomeLabel(selected.outcome)}
+                        </span>
+                        <span className="inspector-model">{selected.provider}</span>
+                        <span className="inspector-model">{selected.model}</span>
+                      </div>
+                      <div className="inspector-note">
+                        这是实际发给 API 的完整请求体（系统提示、历史消息、当前文字、截图与自动补充的文字）。
+                      </div>
+                      {selected.request.map((message, index) => (
+                        <article
+                          key={`${selected.requestId}-${index}`}
+                          className={`inspector-message ${message.role}`}
+                        >
+                          <div className="inspector-message-head">
+                            <strong>
+                              {message.role === 'system'
+                                ? '系统提示'
+                                : message.role === 'user'
+                                  ? '用户'
+                                  : '助手'}
+                            </strong>
+                            <span>#{index + 1}</span>
+                          </div>
+                          {message.text !== undefined ? (
+                            <pre className="inspector-text">{message.text}</pre>
+                          ) : (
+                            (message.parts ?? []).map((part, partIndex) => (
+                              <RequestPartView
+                                key={`${index}-${partIndex}`}
+                                part={part}
+                                onImage={setPreview}
+                              />
+                            ))
+                          )}
+                        </article>
+                      ))}
+                      <div className="inspector-legend">
+                        <span>
+                          录制说明：显示文字 {selected.displayText.length} 字 · 实际发送 {selected.apiText.length} 字
+                        </span>
+                        <span>
+                          历史 {selected.trim.historyCount} 条 → 发送 {selected.trim.sentMessageCount} 条 · 上限{' '}
+                          {selected.trim.messageLimit} 条 / {selected.trim.charLimit} 字
+                        </span>
+                        {selected.imageAttached && <span>图片已作为多模态内容发送</span>}
+                        {selected.ocrApplied && <span>模型不支持图片，已改用 OCR 文字</span>}
+                        {selected.imageOmitted && <span className="error">图片没有发送</span>}
+                      </div>
+                      {selected.images.length > 0 && (
+                        <div className="inspector-image-links">
+                          {selected.images.map((fileName) => (
+                            <button
+                              key={fileName}
+                              className="ghost-button"
+                              onClick={() => void openLogImage(selected, fileName)}
+                            >
+                              查看存档图片 {fileName}
+                            </button>
+                          ))}
+                        </div>
+                      )}
+                      {selected.error && (
+                        <div className="inspector-warning">错误：{selected.error}</div>
+                      )}
+                    </>
+                  )}
+                </div>
               </div>
             ) : (
-              <div className="inspector-note">
-                API 是无状态的。这里显示的是当前会话下一次发消息时会附带的历史上下文；不包含你尚未输入的新问题。失败、停止的消息不会进入上下文。
-              </div>
-            )}
-
-            <div className="inspector-transcript" ref={scrollRef}>
-              {tab === 'transcript' ? (
-                data.messages.length === 0 ? (
-                  <div className="inspector-empty">这个项目还没有消息。</div>
-                ) : (
-                  data.messages.map((message) => (
-                    <article
-                      key={message.id}
-                      className={`inspector-message ${message.role} ${statusClass(message.status)}`}
-                    >
-                      <div className="inspector-message-head">
-                        <strong>{message.role === 'user' ? '用户' : '助手'}</strong>
-                        <span>{formatTime(message.createdAt)}</span>
-                        <span className={`inspector-badge ${statusClass(message.status)}`}>
-                          {statusLabel(message.status)}
-                        </span>
-                        {message.model && <span className="inspector-model">{message.model}</span>}
-                        {message.usage && (
-                          <span className="inspector-model">
-                            {message.usage.promptTokens}+{message.usage.completionTokens} tokens
+              <>
+                <div className="inspector-note">
+                  本地数据库中的完整会话记录（含失败 / 停止）。请求实际发送内容请查看“实际请求”。
+                </div>
+                <div className="inspector-transcript">
+                  {data.messages.length === 0 ? (
+                    <div className="inspector-empty">这个项目还没有消息。</div>
+                  ) : (
+                    data.messages.map((message) => (
+                      <article
+                        key={message.id}
+                        className={`inspector-message ${message.role} ${statusClass(message.status)}`}
+                      >
+                        <div className="inspector-message-head">
+                          <strong>{message.role === 'user' ? '用户' : '助手'}</strong>
+                          <span>{formatTime(message.createdAt)}</span>
+                          <span className={`inspector-badge ${statusClass(message.status)}`}>
+                            {statusLabel(message.status)}
                           </span>
-                        )}
-                      </div>
-                      <pre>{message.content || '（空消息）'}</pre>
-                    </article>
-                  ))
-                )
-              ) : (
-                data.context.map((message, index) => (
-                  <article key={`${message.role}-${index}`} className={`inspector-message ${message.role}`}>
-                    <div className="inspector-message-head">
-                      <strong>
-                        {message.role === 'system'
-                          ? '系统提示'
-                          : message.role === 'user'
-                            ? '历史用户'
-                            : '历史助手'}
-                      </strong>
-                      <span>#{index + 1}</span>
-                    </div>
-                    <pre>{message.content}</pre>
-                  </article>
-                ))
-              )}
-            </div>
+                          {message.model && <span className="inspector-model">{message.model}</span>}
+                          {message.usage && (
+                            <span className="inspector-model">
+                              {message.usage.promptTokens}+{message.usage.completionTokens} tokens
+                            </span>
+                          )}
+                        </div>
+                        <pre className="inspector-text">{message.content || '（空消息）'}</pre>
+                      </article>
+                    ))
+                  )}
+                </div>
+              </>
+            )}
           </>
         ) : null}
       </div>
+
+      {preview && (
+        <div className="inspector-preview" onClick={() => setPreview(null)}>
+          <img src={preview} alt="截图预览" />
+        </div>
+      )}
     </div>
   )
 }
