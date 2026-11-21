@@ -13,6 +13,7 @@ import type {
   ApiStatus,
   BootstrapData,
   CaptureResult,
+  ConversationInspection,
   Folder,
   FolderKind,
   IpcResult,
@@ -60,6 +61,7 @@ const api: MarginApi = {
     toggle: () => ipcRenderer.invoke('window:toggle') as Promise<void>,
     setPinned: (pinned) => ipcRenderer.invoke('window:set-pinned', pinned) as Promise<Settings>,
     setSide: (side) => ipcRenderer.invoke('window:set-side', side) as Promise<Settings>,
+    closeCurrent: () => ipcRenderer.invoke('window:close-current') as Promise<void>,
     onStateChange: (callback) => subscribe<WindowState>('window:state-changed', callback)
   },
   chat: {
@@ -68,6 +70,10 @@ const api: MarginApi = {
     stop: () => ipcRenderer.invoke('chat:stop') as Promise<void>,
     messages: (projectId, before) =>
       ipcRenderer.invoke('chat:messages', projectId, before) as Promise<MessagePage>,
+    inspect: (projectId) =>
+      ipcRenderer.invoke('chat:inspect', projectId) as Promise<ConversationInspection>,
+    openInspector: (projectId) =>
+      ipcRenderer.invoke('chat:open-inspector', projectId) as Promise<void>,
     onStream: (callback) => subscribe<StreamEvent>('chat:stream', callback)
   },
   api: {

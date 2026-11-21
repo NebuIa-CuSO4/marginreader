@@ -1,5 +1,6 @@
 import {
   app,
+  BrowserWindow,
   clipboard,
   dialog,
   globalShortcut,
@@ -20,6 +21,7 @@ import type {
   ApiStatus,
   BootstrapData,
   ChatMessage,
+  ConversationInspection,
   IpcResult,
   Note,
   SelectionAction,
@@ -35,7 +37,7 @@ import type {
   SendMessageInput
 } from '../shared/api'
 import { AppDatabase } from './database'
-import { getDatabasePath, getResource, getTempDir } from './paths'
+import { getDatabasePath, getPreload, getRendererFile, getResource, getTempDir } from './paths'
 import { WindowManager } from './windowManager'
 import { stripVocabBlock } from '../shared/vocab'
 import { ApiError, streamChat, testApiProvider } from './apiClient'
@@ -57,6 +59,7 @@ let tray: Tray | null = null
 let isQuitting = false
 let activeRequest: { projectId: string; assistantId: string; controller: AbortController } | null =
   null
+let inspectorWindow: BrowserWindow | null = null
 const debugFile = process.env.MARGIN_DEBUG
   ? path.join(process.cwd(), 'margin-debug.log')
   : null
@@ -251,6 +254,97 @@ async function emitApiStatus(): Promise<void> {
   sendToRenderer('api:status-changed', status)
 }
 
+async function inspectConversation(projectId: string): Promise<ConversationInspection> {
+  const project = db.getProject(projectId)
+  if (!project) throw new Error('项目不存在。')
+  const conversation = db.getConversation(projectId)
+  const providerRecord = conversation ? db.getApiProvider(conversation.providerId) : null
+  const provider = providerRecord
+    ? { ...providerRecord, hasKey: await hasApiKey(providerRecord.id) }
+    : null
+  const messages = db.listMessages(projectId)
+  const contextMessages = db.listContextMessages(projectId)
+  const context: ConversationInspection['context'] = [
+    { role: 'system', content: systemPrompt(project.title) },
+    ...trimContext(contextMessages).map((message) => ({
+      role: message.role as 'user' | 'assistant',
+      content: message.role === 'assistant' ? stripVocabBlock(message.content) : message.content
+    }))
+  ]
+  const stats = {
+    total: messages.length,
+    user: messages.filter((message) => message.role === 'user').length,
+    assistant: messages.filter((message) => message.role === 'assistant').length,
+    complete: messages.filter((message) => message.status === 'complete').length,
+    error: messages.filter((message) => message.status === 'error').length,
+    interrupted: messages.filter((message) => message.status === 'interrupted').length,
+    other: messages.filter(
+      (message) => !['complete', 'error', 'interrupted'].includes(message.status)
+    ).length
+  }
+  const mismatched = conversation
+    ? messages.filter((message) => message.conversationId !== conversation.id).length
+    : messages.filter((message) => message.conversationId).length
+  return {
+    project,
+    conversation,
+    provider,
+    messages,
+    context,
+    stats,
+    mismatched,
+    theme: db.getSettings().theme
+  }
+}
+
+async function loadInspectorPage(window: BrowserWindow, projectId: string): Promise<void> {
+  const query = new URLSearchParams({ view: 'inspector', projectId }).toString()
+  if (process.env.ELECTRON_RENDERER_URL) {
+    await window.loadURL(`${process.env.ELECTRON_RENDERER_URL}?${query}`)
+  } else {
+    await window.loadFile(getRendererFile('index.html'), {
+      query: { view: 'inspector', projectId }
+    })
+  }
+}
+
+async function openInspectorWindow(projectId: string): Promise<void> {
+  const project = db.getProject(projectId)
+  if (!project) throw new Error('项目不存在。')
+  if (inspectorWindow && !inspectorWindow.isDestroyed()) {
+    inspectorWindow.setTitle(`页边 · ${project.title} · 本地会话`)
+    await loadInspectorPage(inspectorWindow, projectId)
+    inspectorWindow.show()
+    inspectorWindow.focus()
+    return
+  }
+  inspectorWindow = new BrowserWindow({
+    width: 1040,
+    height: 820,
+    minWidth: 720,
+    minHeight: 560,
+    show: false,
+    title: `页边 · ${project.title} · 本地会话`,
+    icon: getResource('icon.png'),
+    backgroundColor: '#f4f1ea',
+    webPreferences: {
+      preload: getPreload('index'),
+      contextIsolation: true,
+      nodeIntegration: false,
+      spellcheck: false
+    }
+  })
+  inspectorWindow.setMenu(null)
+  inspectorWindow.center()
+  inspectorWindow.once('ready-to-show', () => inspectorWindow?.show())
+  inspectorWindow.on('closed', () => {
+    inspectorWindow = null
+  })
+  await loadInspectorPage(inspectorWindow, projectId)
+  if (!inspectorWindow.isVisible()) inspectorWindow.show()
+  inspectorWindow.focus()
+}
+
 function registerIpc(): void {
   ipcMain.handle('app:bootstrap', async () => makeBootstrap())
 
@@ -347,6 +441,9 @@ function registerIpc(): void {
     windows.setSide(next.dockSide)
     sendToRenderer('window:state-changed', windows.getState())
     return next
+  })
+  ipcMain.handle('window:close-current', (event) => {
+    BrowserWindow.fromWebContents(event.sender)?.close()
   })
 
   ipcMain.handle(
@@ -517,6 +614,11 @@ function registerIpc(): void {
   ipcMain.handle('chat:stop', async () => {
     activeRequest?.controller.abort()
   })
+
+  ipcMain.handle('chat:inspect', (_event, projectId: string) => inspectConversation(projectId))
+  ipcMain.handle('chat:open-inspector', (_event, projectId: string) =>
+    openInspectorWindow(projectId)
+  )
 
   ipcMain.handle('api:providers', () => listProviders())
 
@@ -879,6 +981,8 @@ app.on('before-quit', () => {
   globalShortcut.unregisterAll()
   tray?.destroy()
   tray = null
+  inspectorWindow?.destroy()
+  inspectorWindow = null
   selection?.destroy()
   db?.close()
 })

@@ -4,6 +4,7 @@ import type {
   ApiStatus,
   BootstrapData,
   CaptureResult,
+  ConversationInspection,
   Folder,
   FolderKind,
   IpcResult,
@@ -85,12 +86,15 @@ export interface MarginApi {
     toggle: () => Promise<void>
     setPinned: (pinned: boolean) => Promise<Settings>
     setSide: (side: 'right' | 'top') => Promise<Settings>
+    closeCurrent: () => Promise<void>
     onStateChange: (callback: (state: WindowState) => void) => () => void
   }
   chat: {
     send: (input: SendMessageInput) => Promise<IpcResult<ApiConversation | null>>
     stop: () => Promise<void>
     messages: (projectId: string, before?: MessageCursor) => Promise<MessagePage>
+    inspect: (projectId: string) => Promise<ConversationInspection>
+    openInspector: (projectId: string) => Promise<void>
     onStream: (callback: (event: StreamEvent) => void) => () => void
   }
   api: {

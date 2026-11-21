@@ -4,6 +4,7 @@ import {
   ChevronDown,
   ChevronRight,
   ChevronUp,
+  Eye,
   Languages,
   Loader2,
   MessageSquare,
@@ -666,6 +667,14 @@ export default function App(): React.JSX.Element {
     settingsRef.current = data.settings
   }
 
+  async function openInspector(): Promise<void> {
+    try {
+      await window.margin.chat.openInspector(activeIdRef.current)
+    } catch (error) {
+      showToast(error instanceof Error ? error.message : String(error), 'error')
+    }
+  }
+
   async function changeConversationApi(input: {
     providerId?: string
     model?: string
@@ -813,6 +822,13 @@ export default function App(): React.JSX.Element {
             ))}
           </select>
         )}
+        <button
+          className="icon-button small"
+          title="查看本地真实会话与发送记录"
+          onClick={() => void openInspector()}
+        >
+          <Eye size={14} />
+        </button>
       </div>
 
       <nav className="tabs">

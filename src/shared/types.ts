@@ -170,6 +170,25 @@ export interface BootstrapData {
   windowState: WindowState
 }
 
+export interface ConversationInspection {
+  project: Project
+  conversation: ApiConversation | null
+  provider: ApiProvider | null
+  messages: ChatMessage[]
+  context: Array<{ role: 'system' | 'user' | 'assistant'; content: string }>
+  stats: {
+    total: number
+    user: number
+    assistant: number
+    complete: number
+    error: number
+    interrupted: number
+    other: number
+  }
+  mismatched: number
+  theme: Settings['theme']
+}
+
 export interface CaptureResult {
   text: string
   imageDataUrl?: string
