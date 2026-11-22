@@ -1,6 +1,7 @@
 import { net } from 'electron'
+import { supportsWebSearch } from '../shared/types'
 import { OPENAI_RESOURCE } from './chatgptAuth'
-import type { ApiProvider, ApiUsage } from '../shared/types'
+import type { ApiProvider, ApiUsage, SearchStatus } from '../shared/types'
 
 export type ApiContentPart =
   | { type: 'text'; text: string }
@@ -16,6 +17,7 @@ export interface StreamResult {
   reasoning: string
   usage: ApiUsage | null
   finishReason: string | null
+  searchStatus?: SearchStatus
 }
 
 export class ApiError extends Error {
@@ -52,9 +54,11 @@ function statusError(status: number, text: string): ApiError {
   return new ApiError('API_HTTP', `API 请求失败（HTTP ${status}）：${text.slice(0, 180)}`)
 }
 
-export function supportsWebSearch(provider: ApiProvider): boolean {
+function usesResponses(provider: ApiProvider): boolean {
   return provider.kind === 'chatgpt' || provider.kind === 'openai-responses'
 }
+
+export { supportsWebSearch } from '../shared/types'
 
 export async function listChatGPTModels(accessToken: string): Promise<string[]> {
   const response = await net.fetch(OPENAI_RESOURCE + '/models', {
@@ -65,6 +69,21 @@ export async function listChatGPTModels(accessToken: string): Promise<string[]> 
   const data = await response.json() as { models?: Array<{ slug: string; visibility: string }> }
   const models = [...new Set((data.models ?? []).filter((item) => item.visibility === 'list' && item.slug).map((item) => item.slug))]
   if (!models.length) throw new ApiError('CHATGPT_MODELS', '当前账号没有可供 Margin 使用的模型。')
+  return models
+}
+
+export async function listProviderModels(provider: ApiProvider, apiKey: string): Promise<string[]> {
+  if (provider.kind === 'chatgpt') return listChatGPTModels(apiKey)
+  const baseUrl = usesResponses(provider) ? OPENAI_RESOURCE : provider.baseUrl
+  const response = await net.fetch(modelsEndpoint(baseUrl), {
+    headers: { Authorization: `Bearer ${apiKey}`, Accept: 'application/json' },
+    ...(usesResponses(provider) ? { redirect: 'error' as const } : {}),
+    signal: AbortSignal.timeout(20_000)
+  })
+  if (!response.ok) throw statusError(response.status, await response.text())
+  const payload = await response.json() as { data?: Array<{ id?: string }> }
+  const models = [...new Set((payload.data ?? []).flatMap(({ id }) => id ? [id] : []))]
+  if (!models.length) throw new ApiError('API_MODELS', '服务没有返回模型列表。')
   return models
 }
 
@@ -83,6 +102,36 @@ function responsesBody(model: string, messages: ApiMessage[], webSearch: boolean
   }
 }
 
+interface Citation {
+  type: string
+  url?: string
+  end_index?: number
+  url_citation?: { url?: string; end_index?: number }
+}
+
+function withCitations(text: string, annotations: Citation[]): string {
+  const chars = Array.from(text)
+  const links = new Map<number, Map<string, number>>()
+  const numbers = new Map<string, number>()
+  for (const annotation of annotations) {
+    const { url, end_index: end } = annotation.url_citation ?? annotation
+    if (annotation.type !== 'url_citation' || typeof url !== 'string' || !/^https?:\/\//i.test(url)) continue
+    const limit = typeof end === 'number' && Number.isInteger(end) && end >= 0 ? Math.min(end, chars.length) : chars.length
+    const nextBreak = chars.indexOf('\n', limit)
+    const position = nextBreak < 0 ? chars.length : nextBreak
+    const number = numbers.get(url) ?? numbers.size + 1
+    numbers.set(url, number)
+    const row = links.get(position) ?? new Map<string, number>()
+    row.set(url, number)
+    links.set(position, row)
+  }
+  for (const [position, row] of [...links].sort(([a], [b]) => b - a)) {
+    const markers = [...row].map(([url, number]) => '[' + number + '](<' + url.replace(/[<>\s]/g, encodeURIComponent) + '>)')
+    chars.splice(position, 0, ' ' + markers.join(' '))
+  }
+  return chars.join('')
+}
+
 export async function streamChat(
   provider: ApiProvider,
   apiKey: string,
@@ -91,10 +140,11 @@ export async function streamChat(
   signal: AbortSignal,
   onDelta: (text: string) => void,
   onReasoning: (text: string) => void,
-  webSearch = false
+  webSearch = false,
+  onSearchStatus: (status: SearchStatus) => void = () => undefined
 ): Promise<StreamResult> {
-  const responses = supportsWebSearch(provider)
-  if (webSearch && !responses) throw new ApiError('SEARCH_UNSUPPORTED', '当前服务不支持内置联网搜索。')
+  const responses = usesResponses(provider)
+  if (webSearch && !supportsWebSearch(provider)) throw new ApiError('SEARCH_UNSUPPORTED', '当前服务不支持内置联网搜索。')
   const response = await net.fetch(responses ? OPENAI_RESOURCE + '/responses' : endpoint(provider.baseUrl), {
     ...(responses ? { redirect: 'error' as const } : {}),
     method: 'POST',
@@ -103,7 +153,10 @@ export async function streamChat(
       'Content-Type': 'application/json',
       Accept: 'text/event-stream'
     },
-    body: JSON.stringify(responses ? responsesBody(model, messages, webSearch) : { model, messages, stream: true }),
+    body: JSON.stringify(responses ? responsesBody(model, messages, webSearch) : {
+      model, messages, stream: true,
+      ...(webSearch ? { tools: [{ type: 'deepseek_web_search' }] } : {})
+    }),
     signal
   }).catch((error: unknown) => {
     if (signal.aborted && signal.reason?.name === 'AbortError') {
@@ -129,6 +182,22 @@ export async function streamChat(
   let usage: ApiUsage | null = null
   let finishReason: string | null = null
 
+  let searchStatus: SearchStatus | undefined = webSearch ? 'not-used' : undefined
+  let searched = false
+  let citations: Citation[] = []
+  function reportSearch(status: SearchStatus): void {
+    if (!webSearch) return
+    if (status === 'searched') searched = true
+    searchStatus = status
+    onSearchStatus(status)
+  }
+  function finish(): StreamResult {
+    if (!content) throw new ApiError('API_EMPTY', 'API 没有返回回答正文。')
+    if (citations.length) content = withCitations(content, citations)
+    if (searched) reportSearch('searched')
+    else if (searchStatus === 'searching') reportSearch('failed')
+    return { content, reasoning, usage, finishReason, searchStatus }
+  }
   const processLine = (line: string): boolean => {
     const trimmed = line.trim()
     if (!trimmed.startsWith('data:')) return false
@@ -142,6 +211,8 @@ export async function streamChat(
       return false
     }
     if (responses) {
+      if (payload.type === 'response.web_search_call.searching') reportSearch('searching')
+      if (payload.type === 'response.web_search_call.completed') reportSearch('searched')
       if (payload.type === 'response.output_text.delta' && typeof payload.delta === 'string') {
         content += payload.delta
         onDelta(content)
@@ -157,25 +228,20 @@ export async function streamChat(
         ))
       }
       if (payload.type !== 'response.completed') return false
-      const sources = new Map<string, string>()
+      for (const item of payload.response?.output ?? []) {
+        if (item.type === 'web_search_call') reportSearch(item.status === 'completed' ? 'searched' : 'failed')
+      }
       const outputText: string[] = []
       for (const item of payload.response?.output ?? []) {
         if (item.type !== 'message') continue
         for (const part of item.content ?? []) {
-          if (part.type === 'output_text' && typeof part.text === 'string') outputText.push(part.text)
-          for (const annotation of part.annotations ?? []) {
-            if (annotation.type === 'url_citation' && typeof annotation.url === 'string' && /^https?:\/\//i.test(annotation.url)) {
-              sources.set(annotation.url, String(annotation.title || annotation.url))
-            }
+          if (part.type === 'output_text' && typeof part.text === 'string') {
+            outputText.push(withCitations(part.text, part.annotations ?? []))
           }
         }
       }
       if (outputText.length) content = outputText.join('\n\n')
-      if (sources.size) {
-        content += '\n\n**来源**\n\n' + [...sources].map(([url, title]) =>
-          '- [' + title.replace(/[\[\]\\\r\n]/g, ' ') + '](<' + url.replace(/[<>\s]/g, encodeURIComponent) + '>)'
-        ).join('\n')
-      }
+
       const totals = payload.response?.usage
       if (totals) usage = {
         promptTokens: totals.input_tokens ?? 0,
@@ -186,6 +252,9 @@ export async function streamChat(
       if (!content) throw new ApiError('API_EMPTY', 'API 没有返回内容。')
       return true
     }
+    if (payload?.error) {
+      throw new ApiError(String(payload.error.code ?? 'API_RESPONSE'), String(payload.error.message ?? '生成未完成。'))
+    }
     if (payload?.usage) {
       usage = {
         promptTokens: Number(payload.usage.prompt_tokens ?? 0),
@@ -195,6 +264,14 @@ export async function streamChat(
     }
     const choice = payload?.choices?.[0]
     if (!choice) return false
+    const searchEvent = choice.server_tool_event
+    if (searchEvent?.type === 'call_started') reportSearch('searching')
+    if (searchEvent?.type === 'call_completed') reportSearch(searchEvent.call?.status === 'completed' ? 'searched' : 'failed')
+    const message = choice.delta ?? choice.message
+    for (const step of message?.server_tool_calls ?? []) {
+      for (const call of step.calls ?? []) reportSearch(call.status === 'completed' ? 'searched' : 'failed')
+    }
+    if (Array.isArray(message?.annotations)) citations = message.annotations
     const deltaText =
       typeof choice.delta?.content === 'string'
         ? choice.delta.content
@@ -229,12 +306,12 @@ export async function streamChat(
       for (const line of lines) {
         if (processLine(line)) {
           await reader.cancel().catch(() => undefined)
-          return { content, reasoning, usage, finishReason }
+          return finish()
         }
       }
     }
-    if (buffer && processLine(buffer)) return { content, reasoning, usage, finishReason }
-    if (responses) throw new ApiError('API_STREAM', 'Responses API 连接在生成完成前关闭。')
+    if (buffer && processLine(buffer)) return finish()
+    if (responses || !finishReason) throw new ApiError('API_STREAM', 'API 连接在生成完成前关闭。')
   } catch (error) {
     if ((error as Error).name === 'AbortError') {
       throw new ApiError('API_ABORTED', '已停止生成。')
@@ -243,10 +320,7 @@ export async function streamChat(
       ? error
       : new ApiError('API_NETWORK', `API 网络请求失败：${(error as Error).message}`)
   }
-  if (!content && !reasoning) {
-    throw new ApiError('API_EMPTY', 'API 没有返回内容。')
-  }
-  return { content, reasoning, usage, finishReason }
+  return finish()
 }
 
 async function probeVision(
@@ -257,7 +331,7 @@ async function probeVision(
   const image =
     'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg=='
   try {
-    if (supportsWebSearch(provider)) {
+    if (usesResponses(provider)) {
       await streamChat(provider, apiKey, model, [{ role: 'user', content: [
         { type: 'text', text: '这张图是什么颜色？只回答颜色。' },
         { type: 'image_url', image_url: { url: image } }
@@ -359,7 +433,7 @@ export async function testApiProvider(
     models = []
   }
   const target = model || provider.defaultModel || provider.models[0] || models[0] || ''
-  if (supportsWebSearch(provider)) {
+  if (usesResponses(provider)) {
     const signal = AbortSignal.timeout(30_000)
     const messages: ApiMessage[] = [{ role: 'user', content: 'Reply with OK.' }]
     await streamChat(provider, apiKey, target, messages, signal, () => {}, () => {})

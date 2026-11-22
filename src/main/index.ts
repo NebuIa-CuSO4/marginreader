@@ -48,7 +48,7 @@ import {
   systemPrompt,
   writeRequestLog
 } from './requestLog'
-import { ApiError, listChatGPTModels, streamChat, supportsWebSearch, testApiProvider } from './apiClient'
+import { ApiError, listChatGPTModels, listProviderModels, streamChat, supportsWebSearch, testApiProvider } from './apiClient'
 import { CHATGPT_PROVIDER_ID, OPENAI_RESOURCE, chatGPTAccessToken, connectChatGPT, disconnectChatGPT, hasChatGPTSession } from './chatgptAuth'
 import type { ApiMessage } from './apiClient'
 import {
@@ -66,8 +66,7 @@ let capture: CaptureService
 let selection: SelectionService
 let tray: Tray | null = null
 let isQuitting = false
-let activeRequest: { projectId: string; assistantId: string; controller: AbortController } | null =
-  null
+const activeRequests = new Map<string, { assistantId: string; controller: AbortController }>()
 let inspectorWindow: BrowserWindow | null = null
 const REQUEST_LOG_LIMIT = 60
 
@@ -336,6 +335,7 @@ function registerIpc(): void {
 
   ipcMain.handle('app:delete-project', async (_event, projectId: string) => {
     if (projectId === 'english-reading') throw new Error('英语阅读是内置项目，不能删除')
+    if (activeRequests.has(projectId)) throw new Error('请停止该项目的生成后再删除。')
     db.deleteProject(projectId)
     const settings = db.getSettings()
     if (settings.activeProjectId === projectId) db.updateSettings({ activeProjectId: 'english-reading' })
@@ -427,6 +427,10 @@ function registerIpc(): void {
     async (_event, input: SendMessageInput): Promise<IpcResult<ApiConversation | null>> => {
       const text = input.text.trim()
       if (!text) return { ok: false, code: 'EMPTY_MESSAGE', error: '消息不能为空。' }
+      if (activeRequests.has(input.projectId)) return { ok: false, code: 'BUSY', error: '该项目正在生成回答。' }
+      const assistantId = input.assistantId || randomUUID()
+      const controller = new AbortController()
+      activeRequests.set(input.projectId, { assistantId, controller })
       try {
         const { project, conversation, provider, apiKey } = await projectApiContext(
           input.projectId
@@ -436,12 +440,8 @@ function registerIpc(): void {
         }
         const webSearch = input.webSearch === true
         if (webSearch && !supportsWebSearch(provider)) {
-          return { ok: false, code: 'SEARCH_UNSUPPORTED', error: '请切换到 ChatGPT 或 OpenAI Responses 后使用联网搜索。' }
+          return { ok: false, code: 'SEARCH_UNSUPPORTED', error: '当前 API 未配置原生联网搜索。' }
         }
-        if (activeRequest) {
-          activeRequest.controller.abort()
-        }
-        const assistantId = input.assistantId || randomUUID()
         const displayText = input.displayText?.trim() || text
         const model = conversation.model || provider.defaultModel
         let baseText = text
@@ -487,7 +487,7 @@ function registerIpc(): void {
         log.webSearch = webSearch
         const apiMessages = built.messages
         const userMessage: ChatMessage = {
-          id: randomUUID(),
+          id: input.userId || randomUUID(),
           projectId: input.projectId,
           conversationId: conversation.id,
           role: 'user',
@@ -507,10 +507,9 @@ function registerIpc(): void {
           createdAt: Date.now() + 1,
           model: conversation.model
         }
+        if (controller.signal.aborted) return { ok: false, code: 'API_ABORTED', error: '已停止生成。' }
         db.addMessage(userMessage)
         db.addMessage(assistantMessage)
-        const controller = new AbortController()
-        activeRequest = { projectId: input.projectId, assistantId, controller }
         let content = ''
         let reasoning = ''
         let requestLog: ChatRequestLog = { ...log }
@@ -542,7 +541,8 @@ function registerIpc(): void {
             assistantId,
             phase: 'delta',
             text: content,
-            reasoning
+            reasoning,
+            searchStatus: log.searchStatus
           } satisfies StreamEvent)
         }
         try {
@@ -560,7 +560,8 @@ function registerIpc(): void {
               reasoning = value
               emitDelta()
             },
-            webSearch
+            webSearch,
+            (status) => { log.searchStatus = status; emitDelta() }
           )
           db.updateMessage(userMessage.id, displayText, 'complete')
           db.updateMessage(
@@ -569,15 +570,19 @@ function registerIpc(): void {
             'complete',
             result.reasoning,
             result.usage ?? undefined,
-            model
+            model,
+            result.searchStatus
           )
+          content = result.content
+          log.searchStatus = result.searchStatus
           await finishLog('done', { usage: result.usage, finishReason: result.finishReason })
           sendToRenderer('chat:stream', {
             projectId: input.projectId,
             assistantId,
             phase: 'done',
             text: result.content,
-            reasoning: result.reasoning
+            reasoning: result.reasoning,
+            searchStatus: result.searchStatus
           } satisfies StreamEvent)
           await emitApiStatus()
           return { ok: true, data: conversation }
@@ -594,12 +599,13 @@ function registerIpc(): void {
               text: content,
               reasoning
             } satisfies StreamEvent)
-            return { ok: true, data: conversation }
+            return { ok: false, code: 'API_ABORTED', error: '已停止生成。' }
           }
           const message = error instanceof Error ? error.message : String(error)
           const code = apiError?.code ?? 'API_ERROR'
           db.updateMessage(userMessage.id, displayText, content ? 'complete' : 'error')
-          db.updateMessage(assistantId, content || message, 'error', reasoning)
+          if (log.searchStatus === 'searching') log.searchStatus = 'failed'
+          db.updateMessage(assistantId, content || message, 'error', reasoning, undefined, model, log.searchStatus)
           await finishLog('error', { error: message, code })
           sendToRenderer('chat:stream', {
             projectId: input.projectId,
@@ -607,23 +613,25 @@ function registerIpc(): void {
             phase: 'error',
             text: content,
             reasoning,
-            error: message
+            error: message,
+            searchStatus: log.searchStatus
           } satisfies StreamEvent)
           await emitApiStatus()
           return { ok: false, code, error: message }
-        } finally {
-          if (activeRequest?.assistantId === assistantId) activeRequest = null
         }
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error)
         const code = error instanceof ApiError ? error.code : 'API_ERROR'
         return { ok: false, code, error: message }
+      } finally {
+        activeRequests.delete(input.projectId)
       }
     }
   )
 
-  ipcMain.handle('chat:stop', async () => {
-    activeRequest?.controller.abort()
+  ipcMain.handle('chat:stop', (_event, projectId: string, assistantId: string) => {
+    const active = activeRequests.get(projectId)
+    if (active?.assistantId === assistantId) active.controller.abort()
   })
 
   ipcMain.handle('chat:inspect', (_event, projectId: string) => inspectConversation(projectId))
@@ -781,6 +789,37 @@ function registerIpc(): void {
       }
     }
   )
+
+  ipcMain.handle('api:refresh-models', async (_event, providerId: string) => {
+    const provider = db.getApiProvider(providerId)
+    if (!provider) throw new Error('API 配置不存在。')
+    const key = await providerCredential(provider)
+    if (!key) throw new Error('请先配置密钥或连接 ChatGPT。')
+    const models = await listProviderModels(provider, key)
+    const saved = db.saveApiProvider({
+      ...provider,
+      models: provider.kind === 'chatgpt' ? models : [...new Set([...models, ...provider.models])]
+    })
+    return { ...saved, hasKey: true }
+  })
+
+  ipcMain.handle('api:test-search', async (_event, providerId: string, model: string): Promise<ApiTestResult> => {
+    try {
+      const provider = db.getApiProvider(providerId)
+      if (!provider || !supportsWebSearch(provider)) throw new Error('此服务未配置原生联网搜索。')
+      const key = await providerCredential(provider)
+      if (!key) throw new Error('请先配置密钥或连接 ChatGPT。')
+      const result = await streamChat(provider, key, model || provider.defaultModel, [
+        { role: 'user', content: '请联网检索今天中国政府网发布的一条消息，给出标题和来源链接。' }
+      ], AbortSignal.timeout(60_000), () => undefined, () => undefined, true)
+      const searchStatus = result.searchStatus
+      return { ok: searchStatus === 'searched', searchStatus,
+        message: searchStatus === 'searched' ? '模型已完成联网搜索。'
+          : searchStatus === 'failed' ? '模型尝试搜索，但搜索失败。' : '模型已回答，本轮未调用搜索。' }
+    } catch (error) {
+      return { ok: false, message: error instanceof Error ? error.message : String(error) }
+    }
+  })
 
   ipcMain.handle('api:status', () => apiStatusFor(db.getSettings().activeProjectId))
 

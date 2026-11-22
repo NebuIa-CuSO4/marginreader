@@ -8,6 +8,8 @@ export interface Project {
   createdAt: number
 }
 
+export type SearchStatus = 'searching' | 'searched' | 'not-used' | 'failed'
+
 export type ApiProviderKind = 'deepseek' | 'openai-compatible' | 'chatgpt' | 'openai-responses'
 
 export interface ApiProvider {
@@ -21,6 +23,11 @@ export interface ApiProvider {
   hasKey: boolean
   createdAt: number
   updatedAt: number
+}
+
+export function supportsWebSearch(provider: ApiProvider): boolean {
+  return provider.kind === 'chatgpt' || provider.kind === 'openai-responses' ||
+    (provider.kind === 'deepseek' && /^https:\/\/api\.deepseek\.com(?:\/(?:v1|beta))?(?:\/chat\/completions)?\/?$/i.test(provider.baseUrl))
 }
 
 export interface ApiConversation {
@@ -72,6 +79,7 @@ export interface ChatMessage {
   createdAt: number
   model?: string
   usage?: ApiUsage
+  searchStatus?: SearchStatus
 }
 
 export type NoteType = 'note' | 'vocab'
@@ -176,6 +184,7 @@ export type RequestPart =
 
 export interface ChatRequestLog {
   webSearch?: boolean
+  searchStatus?: SearchStatus
   requestId: string
   projectId: string
   assistantId: string
@@ -204,7 +213,7 @@ export interface ChatRequestLog {
   reasoning?: string
   error?: string
   code?: string
-  usage?: ApiUsage | null
+  usage?: ApiUsage
   finishReason?: string | null
 }
 
@@ -251,6 +260,7 @@ export interface SelectionAction {
 }
 
 export interface StreamEvent {
+  searchStatus?: SearchStatus
   projectId: string
   assistantId: string
   phase: 'start' | 'delta' | 'done' | 'error' | 'stopped'

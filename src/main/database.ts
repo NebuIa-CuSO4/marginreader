@@ -5,6 +5,7 @@ import type {
   ApiProvider,
   ApiProviderKind,
   ApiUsage,
+  SearchStatus,
   ChatMessage,
   Folder,
   FolderKind,
@@ -182,6 +183,9 @@ export class AppDatabase {
     }
     if (!messageColumns.some((column) => column.name === 'model')) {
       this.db.exec("ALTER TABLE messages ADD COLUMN model TEXT NOT NULL DEFAULT ''")
+    }
+    if (!messageColumns.some((column) => column.name === 'search_status')) {
+      this.db.exec('ALTER TABLE messages ADD COLUMN search_status TEXT')
     }
     if (!messageColumns.some((column) => column.name === 'usage')) {
       this.db.exec("ALTER TABLE messages ADD COLUMN usage TEXT NOT NULL DEFAULT ''")
@@ -575,6 +579,7 @@ export class AppDatabase {
       status: String(row.status) as ChatMessage['status'],
       createdAt: Number(row.created_at),
       model: row.model ? String(row.model) : undefined,
+      searchStatus: (row.search_status || undefined) as SearchStatus | undefined,
       usage: parseJson<ApiUsage | undefined>(String(row.usage ?? ''), undefined)
     }
   }
@@ -657,11 +662,12 @@ export class AppDatabase {
     status: MessageStatus,
     reasoning = '',
     usage?: ApiUsage,
-    model?: string
+    model?: string,
+    searchStatus?: SearchStatus
   ): void {
     this.db
       .prepare(
-        'UPDATE messages SET content = ?, reasoning = ?, status = ?, usage = ?, model = ? WHERE id = ?'
+        'UPDATE messages SET content = ?, reasoning = ?, status = ?, usage = ?, model = ?, search_status = ? WHERE id = ?'
       )
       .run(
         content,
@@ -669,6 +675,7 @@ export class AppDatabase {
         status,
         usage ? JSON.stringify(usage) : '',
         model ?? '',
+        searchStatus ?? null,
         id
       )
   }

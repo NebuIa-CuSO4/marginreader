@@ -1,18 +1,21 @@
 name: Build release
 
 on:
+  push:
+    tags:
+      - 'v*'
   workflow_dispatch:
     inputs:
       version:
         description: Version without leading v
         required: true
-        default: 0.2.7
+        default: 0.2.8
 
 permissions:
   contents: write
 
 concurrency:
-  group: release-${{ inputs.version }}
+  group: release-${{ inputs.version || github.ref_name }}
   cancel-in-progress: true
 
 jobs:
@@ -47,9 +50,19 @@ jobs:
         shell: pwsh
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_VERSION: ${{ inputs.version || github.ref_name }}
         run: |
-          $version = "${{ inputs.version }}"
+          $version = $env:RELEASE_VERSION -replace '^v', ''
+          if ($version -notmatch '^\d+\.\d+\.\d+$') { throw "Invalid version: $version" }
           $installer = "release/Margin-$version-Setup.exe"
           if (-not (Test-Path $installer)) { throw "Installer not found: $installer" }
-          gh release upload "v$version" $installer --clobber
-          gh release edit "v$version" --draft=false
+          $tag = "v$version"
+          gh release view $tag --json tagName 2>$null
+          if ($LASTEXITCODE) {
+            gh release create $tag $installer --verify-tag --title "Margin $version" --generate-notes
+          } else {
+            gh release upload $tag $installer --clobber
+            if ($LASTEXITCODE) { exit $LASTEXITCODE }
+            gh release edit $tag --draft=false
+          }
+          exit $LASTEXITCODE

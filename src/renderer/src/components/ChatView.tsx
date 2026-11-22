@@ -26,7 +26,7 @@ interface ChatViewProps {
   pendingImage: { dataUrl: string; width: number; height: number } | null
   onRemoveImage: () => void
   onComposerChange: (value: string) => void
-  onSend: (webSearch: boolean) => void
+  onSend: (webSearch: boolean) => Promise<boolean>
   canSearch: boolean
   onStop: () => void
   onCapture: () => void
@@ -60,6 +60,11 @@ const MessageRow = memo(function MessageRow({
             <span>页边</span>
             {message.status === 'streaming' && <Loader2 size={13} className="spin" />}
           </div>
+          {message.searchStatus && (
+            <div className="message-note" role="status">
+              {{ searching: '正在搜索…', searched: '已联网搜索', 'not-used': '本轮未调用搜索', failed: '搜索失败' }[message.searchStatus]}
+            </div>
+          )}
           <ReasoningBlock
             text={message.reasoning ?? ''}
             streaming={message.status === 'streaming'}
@@ -246,8 +251,9 @@ export function ChatView({
 
   function handleSend(): void {
     nearBottomRef.current = true
-    onSend(canSearch && webSearch)
-    setWebSearch(false)
+    void onSend(canSearch && webSearch).then((sent) => {
+      if (sent) setWebSearch(false)
+    })
   }
 
   return (

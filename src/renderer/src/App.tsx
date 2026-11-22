@@ -32,6 +32,7 @@ import type {
   Vocab,
   WindowState
 } from '../../shared/types'
+import { supportsWebSearch } from '../../shared/types'
 import { ChatView } from './components/ChatView'
 import { NotesView } from './components/NotesView'
 import { VocabView } from './components/VocabView'
@@ -122,7 +123,8 @@ export default function App(): React.JSX.Element {
   const activeIdRef = useRef(activeProjectId)
   const conversationRef = useRef<ApiConversation | null>(null)
   const settingsRef = useRef<SettingsType | null>(null)
-  const sendingRef = useRef(false)
+  const activeSends = useRef(new Map<string, string>())
+  const drafts = useRef(new Map<string, { text: string; image: PendingImage | null }>())
   const composerRef = useRef('')
   const toastTimer = useRef<number | null>(null)
   const hideTimer = useRef<number | null>(null)
@@ -140,9 +142,6 @@ export default function App(): React.JSX.Element {
       document.documentElement.dataset.theme = settings.theme
     }
   }, [settings])
-  useEffect(() => {
-    sendingRef.current = sending
-  }, [sending])
   useEffect(() => {
     composerRef.current = composer
   }, [composer])
@@ -169,6 +168,7 @@ export default function App(): React.JSX.Element {
     setProjects(data.projects)
     setActiveProjectId(data.activeProjectId)
     activeIdRef.current = data.activeProjectId
+    setSending(activeSends.current.has(data.activeProjectId))
     setApiProviders(data.apiProviders)
     setConversation(data.conversation)
     conversationRef.current = data.conversation
@@ -219,6 +219,7 @@ export default function App(): React.JSX.Element {
                 role: 'assistant',
                 content: event.text ?? '',
                 reasoning: event.reasoning ?? '',
+                searchStatus: event.searchStatus,
                 status: event.phase === 'done' ? 'complete' : 'streaming',
                 createdAt: Date.now()
               }
@@ -230,6 +231,7 @@ export default function App(): React.JSX.Element {
         const message = { ...next[index] }
         if (event.text !== undefined) message.content = event.text
         if (event.reasoning !== undefined) message.reasoning = event.reasoning
+        if (event.searchStatus) message.searchStatus = event.searchStatus
         if (event.phase === 'delta') message.status = 'streaming'
         if (event.phase === 'done') message.status = 'complete'
         if (event.phase === 'error') {
@@ -240,14 +242,6 @@ export default function App(): React.JSX.Element {
         next[index] = message
         return next
       })
-      if (event.phase === 'delta') {
-        setSending(true)
-        sendingRef.current = true
-      }
-      if (event.phase === 'done' || event.phase === 'stopped' || event.phase === 'error') {
-        setSending(false)
-        sendingRef.current = false
-      }
       if (event.phase === 'error' && event.error) showToast(event.error, 'error')
     })
 
@@ -306,11 +300,15 @@ export default function App(): React.JSX.Element {
           : `请解释下面这段文字的意思、上下文含义和可能的难点：\n\n"""${action.text}"""`
       const sendText = `${prompt}\n\n${VOCAB_FORMAT_INSTRUCTION}`
       setTab('chat')
+      composerRef.current = sendText
       setComposer(sendText)
       void window.margin.window.expand(true)
       const currentSettings = settingsRef.current
       if (currentSettings?.autoSendSelection) {
-        window.setTimeout(() => void performSend(sendText, action.text), 120)
+        const projectId = activeIdRef.current
+        window.setTimeout(() => {
+          if (activeIdRef.current === projectId) void performSend(sendText, action.text)
+        }, 120)
       }
     })
 
@@ -325,10 +323,13 @@ export default function App(): React.JSX.Element {
 
   async function switchProject(projectId: string): Promise<void> {
     const data = await window.margin.app.activateProject(projectId)
+    drafts.current.set(activeIdRef.current, { text: composerRef.current, image: pendingImageRef.current })
     applyBootstrap(data)
-    setComposer('')
-    setPendingImage(null)
-    pendingImageRef.current = null
+    const draft = drafts.current.get(projectId)
+    composerRef.current = draft?.text ?? ''
+    pendingImageRef.current = draft?.image ?? null
+    setComposer(composerRef.current)
+    setPendingImage(pendingImageRef.current)
     setTab('chat')
     setProjectsOpen(false)
   }
@@ -338,15 +339,18 @@ export default function App(): React.JSX.Element {
     displayText?: string,
     imageDataUrl?: string,
     webSearch = false
-  ): Promise<void> {
+  ): Promise<boolean> {
     const clean = text.trim() || (imageDataUrl ? '请看这张截图。' : '')
-    if (!clean || sendingRef.current) return
-    if (!conversationRef.current || status.phase === 'not_configured') {
+    const projectId = activeIdRef.current
+    if (!clean || activeSends.current.has(projectId)) return false
+    if (!conversationRef.current) {
       showToast('请先在设置中配置 API、密钥和模型。', 'error')
       setSettingsOpen(true)
-      return
+      return false
     }
     const assistantId = crypto.randomUUID()
+    const originalDraft = composerRef.current
+    activeSends.current.set(projectId, assistantId)
     const userId = crypto.randomUUID()
     const timestamp = Date.now()
     const shownText = displayText?.trim() || clean
@@ -372,44 +376,52 @@ export default function App(): React.JSX.Element {
         createdAt: timestamp + 1
       }
     ])
-    setComposer('')
     setSending(true)
-    sendingRef.current = true
     setTab('chat')
     try {
       const result = await window.margin.chat.send({
-        projectId: activeIdRef.current,
+        projectId,
         text: clean,
         displayText: shownText,
         assistantId,
+        userId,
         imageDataUrl,
         webSearch
       })
+      if (activeIdRef.current !== projectId) {
+        const draft = drafts.current.get(projectId)
+        if (result.ok && draft?.text === originalDraft && draft.image?.dataUrl === imageDataUrl) drafts.current.delete(projectId)
+        return result.ok
+      }
       if (!result.ok) {
         setMessages((previous) =>
           previous.map((message) => {
-            if (message.id === userId) return { ...message, status: 'complete' }
+            if (message.id === userId) return { ...message, status: 'error' }
             if (message.id === assistantId) {
-              return { ...message, status: 'error', content: result.error ?? '发送失败' }
+              return { ...message, status: result.code === 'API_ABORTED' ? 'interrupted' : 'error', content: message.content || result.error || '发送失败' }
             }
             return message
           })
         )
-        setSending(false)
-        sendingRef.current = false
-        showToast(result.error ?? '发送失败', 'error')
-        return
+        showToast(result.error ?? '发送失败', result.code === 'API_ABORTED' ? 'info' : 'error')
+        return false
       }
       setMessages((previous) =>
         previous.map((message) =>
           message.id === userId ? { ...message, status: 'complete' } : message
         )
       )
-      if (imageDataUrl) {
+      if (composerRef.current === originalDraft) {
+        composerRef.current = ''
+        setComposer('')
+      }
+      if (imageDataUrl && pendingImageRef.current?.dataUrl === imageDataUrl) {
         setPendingImage(null)
         pendingImageRef.current = null
       }
+      return true
     } catch (error) {
+      if (activeIdRef.current !== projectId) return false
       const message = error instanceof Error ? error.message : String(error)
       setMessages((previous) =>
         previous.map((item) => {
@@ -418,29 +430,26 @@ export default function App(): React.JSX.Element {
           return item
         })
       )
-      setSending(false)
-      sendingRef.current = false
       showToast(message, 'error')
+      return false
+    } finally {
+      activeSends.current.delete(projectId)
+      if (activeIdRef.current === projectId) setSending(false)
     }
   }
 
-  function requestSend(webSearch = false): void {
+  async function requestSend(webSearch = false): Promise<boolean> {
     const text = composerRef.current.trim()
     const imageDataUrl = pendingImageRef.current?.dataUrl
-    if (!text && !imageDataUrl) return
+    if (!text && !imageDataUrl) return false
     const sendText = text || '请看这张截图。'
-    void performSend(sendText, undefined, imageDataUrl, webSearch)
+    return performSend(sendText, undefined, imageDataUrl, webSearch)
   }
 
   async function stopGeneration(): Promise<void> {
-    await window.margin.chat.stop()
-    showToast('已请求停止')
-    window.setTimeout(() => {
-      if (sendingRef.current) {
-        setSending(false)
-        sendingRef.current = false
-      }
-    }, 1800)
+    const projectId = activeIdRef.current
+    const assistantId = activeSends.current.get(projectId)
+    if (assistantId) await window.margin.chat.stop(projectId, assistantId)
   }
 
   async function loadOlderMessages(): Promise<void> {
@@ -864,8 +873,7 @@ export default function App(): React.JSX.Element {
             }}
             onComposerChange={setComposer}
             onSend={requestSend}
-            canSearch={apiProviders.some(({ id, kind }) => id === conversation?.providerId &&
-              (kind === 'chatgpt' || kind === 'openai-responses'))}
+            canSearch={Boolean(activeProvider && supportsWebSearch(activeProvider))}
             onStop={() => void stopGeneration()}
             onCapture={() => void window.margin.capture.start()}
             onSelectionHelp={() => showToast(`在任意应用中选中文字后按 ${shortcut}`)}

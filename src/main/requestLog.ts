@@ -23,24 +23,20 @@ export function systemPrompt(projectTitle: string): string {
 
 /**
  * Keeps the most recent history under a character budget. The conversation is
- * cut at a user boundary so an answer never appears without its question, and
- * the last available user/assistant pair is always kept.
+ * cut at a user boundary so an answer never appears without its question.
  */
-export function trimContext(messages: ChatMessage[]): ChatMessage[] {
-  const recent = messages.slice(-MAX_CONTEXT_MESSAGES)
+export function trimContext(messages: ChatMessage[], charBudget = MAX_MESSAGE_CHARS): ChatMessage[] {
+  let start = messages.length
   let chars = 0
-  let start = recent.length
-  for (let index = recent.length - 1; index >= 0; index -= 1) {
-    chars += recent[index].content.length
-    const isBoundary = recent[index].role === 'user'
-    if (isBoundary) start = index
-    if (isBoundary && start <= recent.length - 2 && chars > MAX_MESSAGE_CHARS) {
-      start = index
-      break
-    }
-    start = index
+  while (start >= 2 && messages.length - start < MAX_CONTEXT_MESSAGES) {
+    const user = messages[start - 2]
+    const answer = messages[start - 1]
+    if (user.role !== 'user' || answer.role !== 'assistant') break
+    chars += user.content.length + answer.content.length
+    if (chars > charBudget) break
+    start -= 2
   }
-  return recent.slice(start)
+  return messages.slice(start)
 }
 
 export function buildRequestMessages(
@@ -50,8 +46,9 @@ export function buildRequestMessages(
   imageDataUrl: string,
   supportsVision: boolean
 ): ApiMessage[] {
-  const result: ApiMessage[] = [{ role: 'system', content: systemPrompt(projectTitle) }]
-  trimContext(history).forEach((message) => {
+  const prompt = systemPrompt(projectTitle)
+  const result: ApiMessage[] = [{ role: 'system', content: prompt }]
+  trimContext(history, MAX_MESSAGE_CHARS - prompt.length - userText.length).forEach((message) => {
     if (message.role !== 'user' && message.role !== 'assistant') return
     result.push({
       role: message.role,

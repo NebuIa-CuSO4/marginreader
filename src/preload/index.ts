@@ -67,7 +67,7 @@ const api: MarginApi = {
   chat: {
     send: (input) =>
       ipcRenderer.invoke('chat:send', input) as Promise<IpcResult<ApiConversation | null>>,
-    stop: () => ipcRenderer.invoke('chat:stop') as Promise<void>,
+    stop: (projectId, assistantId) => ipcRenderer.invoke('chat:stop', projectId, assistantId) as Promise<void>,
     messages: (projectId, before) =>
       ipcRenderer.invoke('chat:messages', projectId, before) as Promise<MessagePage>,
     inspect: (projectId) =>
@@ -90,6 +90,8 @@ const api: MarginApi = {
     clearKey: (providerId) => ipcRenderer.invoke('api:clear-key', providerId) as Promise<void>,
     test: (providerId, options) =>
       ipcRenderer.invoke('api:test', providerId, options) as Promise<ApiTestResult>,
+    refreshModels: (id) => ipcRenderer.invoke('api:refresh-models', id) as Promise<ApiProvider>,
+    testSearch: (id, model) => ipcRenderer.invoke('api:test-search', id, model) as Promise<ApiTestResult>,
     status: () => ipcRenderer.invoke('api:status') as Promise<ApiStatus>,
     setConversation: (input) =>
       ipcRenderer.invoke('api:set-conversation', input) as Promise<ApiConversation | null>,

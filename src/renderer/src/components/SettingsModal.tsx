@@ -11,6 +11,7 @@ import {
   Trash2
 } from 'lucide-react'
 import type { ApiConversation, ApiProvider, ApiStatus, Settings } from '../../../shared/types'
+import { supportsWebSearch } from '../../../shared/types'
 import { Modal } from './Modal'
 
 interface SettingsModalProps {
@@ -315,6 +316,17 @@ export function SettingsModal({
                 {busy ? <Loader2 size={14} className="spin" /> : <RefreshCw size={14} />}
                 测试连接
               </button>
+              <button className="ghost-button" disabled={busy || !selected?.hasKey} onClick={() => void run(async () => {
+                if (!selected) return
+                const provider = await window.margin.api.refreshModels(selected.id)
+                await onRefresh()
+                setResult(`已刷新 ${provider.models.length} 个模型。`)
+              })}>刷新模型列表</button>
+              <button className="ghost-button" disabled={busy || !selected?.hasKey || !supportsWebSearch(selected)} onClick={() => void run(async () => {
+                if (!selected) return
+                const result = await window.margin.api.testSearch(selected.id, testModel)
+                setResult(result.message)
+              })}>测试原生联网</button>
             </div>
           </div>
 

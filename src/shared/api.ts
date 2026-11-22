@@ -14,6 +14,7 @@ import type {
   NoteTypeDefinition,
   Project,
   ProjectKind,
+  SearchStatus,
   SelectionAction,
   Settings,
   StreamEvent,
@@ -45,6 +46,7 @@ export interface SendMessageInput {
   text: string
   displayText?: string
   assistantId: string
+  userId?: string
   imageDataUrl?: string
 }
 
@@ -64,6 +66,7 @@ export interface ApiTestResult {
   message: string
   models?: string[]
   supportsVision?: boolean
+  searchStatus?: SearchStatus
 }
 
 export interface MarginApi {
@@ -93,7 +96,7 @@ export interface MarginApi {
   }
   chat: {
     send: (input: SendMessageInput) => Promise<IpcResult<ApiConversation | null>>
-    stop: () => Promise<void>
+    stop: (projectId: string, assistantId: string) => Promise<void>
     messages: (projectId: string, before?: MessageCursor) => Promise<MessagePage>
     inspect: (projectId: string) => Promise<ConversationInspection>
     openInspector: (projectId: string) => Promise<void>
@@ -109,6 +112,8 @@ export interface MarginApi {
     saveKey: (providerId: string, key: string) => Promise<void>
     clearKey: (providerId: string) => Promise<void>
     test: (providerId: string, options?: { model?: string; probeImages?: boolean }) => Promise<ApiTestResult>
+    refreshModels: (providerId: string) => Promise<ApiProvider>
+    testSearch: (providerId: string, model: string) => Promise<ApiTestResult>
     status: () => Promise<ApiStatus>
     setConversation: (input: {
       projectId: string

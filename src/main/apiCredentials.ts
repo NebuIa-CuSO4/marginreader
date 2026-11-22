@@ -15,8 +15,9 @@ async function readStore(): Promise<CredentialFile> {
     const raw = await fs.readFile(credentialPath(), 'utf8')
     const parsed = JSON.parse(raw) as CredentialFile
     return parsed?.keys ? parsed : { keys: {} }
-  } catch {
-    return { keys: {} }
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return { keys: {} }
+    throw new Error('无法读取本地 API 密钥文件。')
   }
 }
 
@@ -33,30 +34,38 @@ export async function hasApiKey(providerId: string): Promise<boolean> {
 }
 
 export async function getApiKey(providerId: string): Promise<string | null> {
-  const store = await readStore()
-  const encrypted = store.keys[providerId]
-  if (!encrypted) return null
   try {
+    const store = await readStore()
+    const encrypted = store.keys[providerId]
+    if (!encrypted) return null
     return safeStorage.decryptString(Buffer.from(encrypted, 'base64'))
   } catch {
     return null
   }
 }
 
+let pendingWrite = Promise.resolve()
+
+function updateStore(change: (store: CredentialFile) => void): Promise<void> {
+  const operation = pendingWrite.then(async () => {
+    const store = await readStore()
+    change(store)
+    await writeStore(store)
+  })
+  pendingWrite = operation.catch(() => undefined)
+  return operation
+}
+
 export async function saveApiKey(providerId: string, key: string): Promise<void> {
   if (!safeStorage.isEncryptionAvailable()) {
     throw new Error('当前系统无法安全保存 API Key，已拒绝明文存储。')
   }
-  const store = await readStore()
   const encrypted = safeStorage.encryptString(key.trim()).toString('base64')
-  store.keys[providerId] = encrypted
-  await writeStore(store)
+  await updateStore((store) => { store.keys[providerId] = encrypted })
 }
 
 export async function clearApiKey(providerId: string): Promise<void> {
-  const store = await readStore()
-  delete store.keys[providerId]
-  await writeStore(store)
+  await updateStore((store) => { delete store.keys[providerId] })
 }
 
 export async function listConfiguredProviders(): Promise<string[]> {

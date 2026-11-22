@@ -1,6 +1,6 @@
 {
   "name": "margin-reader",
-  "version": "0.2.7",
+  "version": "0.2.8",
   "private": true,
   "description": "页边 Margin — Windows 阅读伴读侧栏（API 对话版）",
   "main": "./out/main/index.js",
