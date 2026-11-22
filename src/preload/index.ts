@@ -79,6 +79,8 @@ const api: MarginApi = {
     onStream: (callback) => subscribe<StreamEvent>('chat:stream', callback)
   },
   api: {
+    connectChatGPT: () => ipcRenderer.invoke('api:connect-chatgpt') as Promise<ApiProvider>,
+    disconnectChatGPT: () => ipcRenderer.invoke('api:disconnect-chatgpt') as Promise<void>,
     providers: () => ipcRenderer.invoke('api:providers') as Promise<ApiProvider[]>,
     saveProvider: (input) =>
       ipcRenderer.invoke('api:save-provider', input) as Promise<ApiProvider>,

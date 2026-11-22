@@ -254,7 +254,7 @@ export function InspectorPage({ projectId }: { projectId: string }): React.JSX.E
                         </div>
                         <p>{log.displayText.slice(0, 90) || '（无文字）'}</p>
                         <span className="inspector-log-meta">
-                          {log.model} · {log.request.length} 条消息
+                          {log.model} · {log.request.length} 条消息{log.webSearch ? ' · 联网搜索' : ''}
                           {log.imageAttached ? ' · 含图片' : ''}
                           {log.ocrApplied ? ' · OCR' : ''}
                           {log.screenContextApplied ? ' · 屏幕上下文' : ''}

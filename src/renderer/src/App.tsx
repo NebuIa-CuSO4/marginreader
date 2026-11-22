@@ -336,7 +336,8 @@ export default function App(): React.JSX.Element {
   async function performSend(
     text: string,
     displayText?: string,
-    imageDataUrl?: string
+    imageDataUrl?: string,
+    webSearch = false
   ): Promise<void> {
     const clean = text.trim() || (imageDataUrl ? '请看这张截图。' : '')
     if (!clean || sendingRef.current) return
@@ -381,7 +382,8 @@ export default function App(): React.JSX.Element {
         text: clean,
         displayText: shownText,
         assistantId,
-        imageDataUrl
+        imageDataUrl,
+        webSearch
       })
       if (!result.ok) {
         setMessages((previous) =>
@@ -407,10 +409,6 @@ export default function App(): React.JSX.Element {
         setPendingImage(null)
         pendingImageRef.current = null
       }
-      if (result.data) {
-        setConversation(result.data)
-        conversationRef.current = result.data
-      }
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error)
       setMessages((previous) =>
@@ -426,12 +424,12 @@ export default function App(): React.JSX.Element {
     }
   }
 
-  function requestSend(): void {
+  function requestSend(webSearch = false): void {
     const text = composerRef.current.trim()
     const imageDataUrl = pendingImageRef.current?.dataUrl
     if (!text && !imageDataUrl) return
     const sendText = text || '请看这张截图。'
-    void performSend(sendText, undefined, imageDataUrl)
+    void performSend(sendText, undefined, imageDataUrl, webSearch)
   }
 
   async function stopGeneration(): Promise<void> {
@@ -866,6 +864,8 @@ export default function App(): React.JSX.Element {
             }}
             onComposerChange={setComposer}
             onSend={requestSend}
+            canSearch={apiProviders.some(({ id, kind }) => id === conversation?.providerId &&
+              (kind === 'chatgpt' || kind === 'openai-responses'))}
             onStop={() => void stopGeneration()}
             onCapture={() => void window.margin.capture.start()}
             onSelectionHelp={() => showToast(`在任意应用中选中文字后按 ${shortcut}`)}

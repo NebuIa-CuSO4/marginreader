@@ -48,7 +48,8 @@ import {
   systemPrompt,
   writeRequestLog
 } from './requestLog'
-import { ApiError, streamChat, testApiProvider } from './apiClient'
+import { ApiError, listChatGPTModels, streamChat, supportsWebSearch, testApiProvider } from './apiClient'
+import { CHATGPT_PROVIDER_ID, OPENAI_RESOURCE, chatGPTAccessToken, connectChatGPT, disconnectChatGPT, hasChatGPTSession } from './chatgptAuth'
 import type { ApiMessage } from './apiClient'
 import {
   clearApiKey,
@@ -107,12 +108,20 @@ function activeProjectId(settings: Settings): string {
   return 'english-reading'
 }
 
+function providerHasCredentials(provider: ApiProvider): Promise<boolean> {
+  return provider.kind === 'chatgpt' ? hasChatGPTSession() : hasApiKey(provider.id)
+}
+
+function providerCredential(provider: ApiProvider): Promise<string | null> {
+  return provider.kind === 'chatgpt' ? chatGPTAccessToken() : getApiKey(provider.id)
+}
+
 async function listProviders(): Promise<ApiProvider[]> {
   const providers = db.listApiProviders()
   return Promise.all(
     providers.map(async (provider) => ({
       ...provider,
-      hasKey: await hasApiKey(provider.id)
+      hasKey: await providerHasCredentials(provider)
     }))
   )
 }
@@ -126,10 +135,10 @@ async function apiStatusFor(projectId: string): Promise<ApiStatus> {
   if (!conversation || !provider) {
     return { phase: 'not_configured', message: '还没有配置 API 对话。' }
   }
-  if (!(await hasApiKey(provider.id))) {
+  if (!(await providerHasCredentials(provider))) {
     return {
       phase: 'not_configured',
-      message: `请为 ${provider.name} 配置 API Key。`,
+      message: provider.kind === 'chatgpt' ? '请在设置中连接 ChatGPT。' : `请为 ${provider.name} 配置 API Key。`,
       providerId: provider.id,
       model: conversation.model
     }
@@ -210,8 +219,9 @@ async function projectApiContext(projectId: string): Promise<{
   if (!conversation) throw new ApiError('NO_CONVERSATION', '当前项目还没有 API 对话。')
   const provider = db.getApiProvider(conversation.providerId)
   if (!provider) throw new ApiError('NO_PROVIDER', '当前项目的 API 配置不存在。')
-  const apiKey = await getApiKey(provider.id)
-  if (!apiKey) throw new ApiError('API_KEY_MISSING', `请为 ${provider.name} 配置 API Key。`)
+  const apiKey = await providerCredential(provider)
+  if (!apiKey) throw new ApiError('API_KEY_MISSING', provider.kind === 'chatgpt'
+    ? '请在设置中连接 ChatGPT。' : `请为 ${provider.name} 配置 API Key。`)
   return { project, conversation, provider, apiKey }
 }
 
@@ -226,7 +236,7 @@ async function inspectConversation(projectId: string): Promise<ConversationInspe
   const conversation = db.getConversation(projectId)
   const providerRecord = conversation ? db.getApiProvider(conversation.providerId) : null
   const provider = providerRecord
-    ? { ...providerRecord, hasKey: await hasApiKey(providerRecord.id) }
+    ? { ...providerRecord, hasKey: await providerHasCredentials(providerRecord) }
     : null
   const messages = db.listMessages(projectId)
   const stats = {
@@ -424,6 +434,10 @@ function registerIpc(): void {
         if (!net.isOnline()) {
           return { ok: false, code: 'NETWORK_OFFLINE', error: '网络未连接。' }
         }
+        const webSearch = input.webSearch === true
+        if (webSearch && !supportsWebSearch(provider)) {
+          return { ok: false, code: 'SEARCH_UNSUPPORTED', error: '请切换到 ChatGPT 或 OpenAI Responses 后使用联网搜索。' }
+        }
         if (activeRequest) {
           activeRequest.controller.abort()
         }
@@ -470,6 +484,7 @@ function registerIpc(): void {
             error: '当前 API 模型不支持图片，且没有识别出截图文字。'
           }
         }
+        log.webSearch = webSearch
         const apiMessages = built.messages
         const userMessage: ChatMessage = {
           id: randomUUID(),
@@ -544,7 +559,8 @@ function registerIpc(): void {
             (value) => {
               reasoning = value
               emitDelta()
-            }
+            },
+            webSearch
           )
           db.updateMessage(userMessage.id, displayText, 'complete')
           db.updateMessage(
@@ -630,6 +646,37 @@ function registerIpc(): void {
 
   ipcMain.handle('api:providers', () => listProviders())
 
+  ipcMain.handle('api:connect-chatgpt', async () => {
+    await connectChatGPT()
+    const key = await chatGPTAccessToken()
+    if (!key) throw new Error('没有可用的 ChatGPT 授权。')
+    const models = await listChatGPTModels(key)
+    const previous = db.getApiProvider(CHATGPT_PROVIDER_ID)
+    const defaultModel = previous && models.includes(previous.defaultModel) ? previous.defaultModel : models[0]
+    const provider = db.saveApiProvider({
+      id: CHATGPT_PROVIDER_ID, name: 'ChatGPT 订阅', kind: 'chatgpt',
+      baseUrl: OPENAI_RESOURCE, models, defaultModel,
+      supportsVision: previous?.supportsVision ?? false
+    })
+    for (const project of db.listProjects()) {
+      const conversation = db.getConversation(project.id)
+      if (conversation?.providerId === provider.id && !models.includes(conversation.model)) {
+        db.updateConversation(project.id, { model: defaultModel })
+      }
+    }
+    const settings = db.getSettings()
+    if (settings.defaultProviderId === provider.id && !models.includes(settings.defaultModel)) {
+      db.updateSettings({ defaultModel })
+    }
+    await emitApiStatus()
+    return { ...provider, hasKey: true }
+  })
+
+  ipcMain.handle('api:disconnect-chatgpt', async () => {
+    await disconnectChatGPT()
+    await emitApiStatus()
+  })
+
   ipcMain.handle(
     'api:save-provider',
     async (
@@ -637,7 +684,12 @@ function registerIpc(): void {
       input: Partial<ApiProvider> & { id: string; name: string; baseUrl: string }
     ) => {
       if (!input.baseUrl?.trim()) throw new Error('Base URL 不能为空。')
-      const provider = db.saveApiProvider(input)
+      const current = db.getApiProvider(input.id)
+      if (input.kind === 'chatgpt' || input.id === CHATGPT_PROVIDER_ID || current?.kind === 'chatgpt') {
+        if (current?.kind !== 'chatgpt') throw new Error('请通过 ChatGPT 登录添加此服务。')
+        return { ...db.saveApiProvider({ ...current, supportsVision: input.supportsVision }), hasKey: await hasChatGPTSession() }
+      }
+      const provider = db.saveApiProvider(input.kind === 'openai-responses' ? { ...input, baseUrl: OPENAI_RESOURCE } : input)
       const settings = db.getSettings()
       if (!settings.defaultProviderId) {
         db.updateSettings({ defaultProviderId: provider.id, defaultModel: provider.defaultModel })
@@ -652,11 +704,12 @@ function registerIpc(): void {
         }
       }
       await emitApiStatus()
-      return { ...provider, hasKey: await hasApiKey(provider.id) }
+      return { ...provider, hasKey: await providerHasCredentials(provider) }
     }
   )
 
   ipcMain.handle('api:delete-provider', async (_event, id: string) => {
+    if (id === CHATGPT_PROVIDER_ID) throw new Error('请使用断开 ChatGPT。')
     if (db.listApiProviders().length <= 1) {
       throw new Error('至少保留一个 API 配置。')
     }
@@ -679,6 +732,7 @@ function registerIpc(): void {
   })
 
   ipcMain.handle('api:save-key', async (_event, providerId: string, key: string) => {
+    if (db.getApiProvider(providerId)?.kind === 'chatgpt') throw new Error('ChatGPT 使用账号授权。')
     if (!db.getApiProvider(providerId)) throw new Error('API 配置不存在。')
     if (!String(key ?? '').trim()) throw new Error('API Key 不能为空。')
     await saveApiKey(providerId, key)
@@ -699,12 +753,12 @@ function registerIpc(): void {
     ): Promise<ApiTestResult> => {
       const provider = db.getApiProvider(providerId)
       if (!provider) return { ok: false, message: 'API 配置不存在。' }
-      const key = await getApiKey(providerId)
-      if (!key) return { ok: false, message: '还没有配置 API Key。' }
       const model = options?.model?.trim() || provider.defaultModel
       try {
+        const key = await providerCredential(provider)
+        if (!key) return { ok: false, message: '请先配置密钥或连接 ChatGPT。' }
         const result = await testApiProvider(provider, key, model, Boolean(options?.probeImages))
-        if (result.models.length) {
+        if (result.models.length && provider.kind !== 'chatgpt') {
           db.saveApiProvider({
             ...provider,
             models: Array.from(new Set([...provider.models, ...result.models])),
@@ -742,6 +796,7 @@ function registerIpc(): void {
       const provider = db.getApiProvider(providerId)
       if (!provider) throw new Error('API 配置不存在。')
       const model = input.model ?? (providerId === conversation.providerId ? conversation.model : provider.defaultModel)
+      if (provider.kind === 'chatgpt' && !provider.models.includes(model)) throw new Error('请从 ChatGPT 账号的可用模型中选择。')
       const next = db.updateConversation(input.projectId, { providerId, model })
       const settings = db.getSettings()
       if (settings.activeProjectId === input.projectId) {

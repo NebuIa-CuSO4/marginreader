@@ -144,7 +144,7 @@ export function SettingsModal({
     await run(async () => {
       const testResult = await window.margin.api.test(selected.id, {
         model: testModel || undefined,
-        probeImages: true
+        probeImages: false
       })
       setResult(testResult.message)
       await onRefresh()
@@ -172,14 +172,25 @@ export function SettingsModal({
     })
   }
 
-  async function addProvider(): Promise<void> {
+  async function authorizeChatGPT(): Promise<void> {
+    await run(async () => {
+      setResult('请在浏览器中完成 ChatGPT 授权。')
+      const provider = await window.margin.api.connectChatGPT()
+      await onRefresh()
+      setSelectedId(provider.id)
+      await onConversationChange({ providerId: provider.id })
+      setResult('ChatGPT 已连接，当前项目可在模型菜单中切换。')
+    })
+  }
+
+  async function addProvider(responses = false): Promise<void> {
     const id = `api-${Date.now()}`
     await run(async () => {
       const provider = await window.margin.api.saveProvider({
         id,
-        name: '自定义 API',
+        name: responses ? 'OpenAI Responses' : '自定义 API',
         baseUrl: 'https://api.openai.com/v1',
-        kind: 'openai-compatible',
+        kind: responses ? 'openai-responses' : 'openai-compatible',
         models: ['gpt-4o-mini'],
         defaultModel: 'gpt-4o-mini',
         supportsVision: false
@@ -211,12 +222,20 @@ export function SettingsModal({
       <div className="settings-sections">
         <section>
           <h4>API 服务</h4>
+          <div className="provider-actions">
+            <button className="primary-button" type="button" disabled={busy} onClick={() => void authorizeChatGPT()}>
+              Continue with ChatGPT
+            </button>
+            <button className="ghost-button" type="button" disabled={busy} onClick={() => void addProvider(true)}>
+              添加 OpenAI Responses API
+            </button>
+          </div>
           <div className="provider-toolbar">
             <select value={selectedId} onChange={(event) => setSelectedId(event.target.value)}>
               {providers.map((provider) => (
                 <option key={provider.id} value={provider.id}>
                   {provider.name}
-                  {provider.hasKey ? ' · 已配置密钥' : ''}
+                  {provider.hasKey ? (provider.kind === 'chatgpt' ? ' · 已授权' : ' · 已配置密钥') : ''}
                 </option>
               ))}
             </select>
@@ -227,7 +246,7 @@ export function SettingsModal({
             <button
               className="ghost-button danger-text"
               onClick={() => void removeProvider()}
-              disabled={busy || providers.length <= 1}
+              disabled={busy || providers.length <= 1 || selected?.kind === 'chatgpt'}
             >
               <Trash2 size={14} />
               删除
@@ -237,12 +256,13 @@ export function SettingsModal({
           <div className="provider-form">
             <label>
               名称
-              <input value={name} onChange={(event) => { setName(event.target.value); setDirty(true) }} />
+              <input value={name} readOnly={selected?.kind === 'chatgpt'} onChange={(event) => { setName(event.target.value); setDirty(true) }} />
             </label>
             <label>
               Base URL
               <input
                 value={baseUrl}
+                readOnly={selected?.kind === 'chatgpt' || selected?.kind === 'openai-responses'}
                 onChange={(event) => { setBaseUrl(event.target.value); setDirty(true) }}
                 placeholder="https://api.deepseek.com"
               />
@@ -252,6 +272,7 @@ export function SettingsModal({
               <textarea
                 rows={3}
                 value={models}
+                readOnly={selected?.kind === 'chatgpt'}
                 onChange={(event) => { setModels(event.target.value); setDirty(true) }}
               />
             </label>
@@ -259,6 +280,7 @@ export function SettingsModal({
               默认模型
               <input
                 value={defaultModel}
+                readOnly={selected?.kind === 'chatgpt'}
                 onChange={(event) => { setDefaultModel(event.target.value); setDirty(true) }}
               />
             </label>
@@ -286,7 +308,7 @@ export function SettingsModal({
               </button>
             </div>
             <div className="provider-actions">
-              <button className="primary-button" disabled={busy} onClick={() => void saveProvider()}>
+              <button className="primary-button" disabled={busy || selected?.kind === 'chatgpt'} onClick={() => void saveProvider()}>
                 {dirty ? '保存 API（有未保存修改）' : '保存 API'}
               </button>
               <button className="ghost-button" disabled={busy} onClick={() => void test()}>
@@ -296,7 +318,21 @@ export function SettingsModal({
             </div>
           </div>
 
-          <div className="key-row">
+          {selected?.kind === 'chatgpt' ? (
+            <div className="key-row">
+              <div>
+                <strong>ChatGPT 订阅额度</strong>
+                <span>{selected.hasKey ? '已授权' : '尚未授权'}</span>
+              </div>
+              <button className="ghost-button" disabled={busy} onClick={() => void run(async () => {
+                await window.margin.api.disconnectChatGPT()
+                await onRefresh()
+                setResult('已清除本机的 ChatGPT 登录凭据。')
+              })}>
+                断开 ChatGPT
+              </button>
+            </div>
+          ) : <div className="key-row">
             <div>
               <strong>API Key</strong>
               <span>{selected?.hasKey ? '已加密保存，输入新值可替换。' : '尚未配置。'}</span>
@@ -317,8 +353,8 @@ export function SettingsModal({
                 保存
               </button>
             </div>
-          </div>
-          {selected?.hasKey && (
+          </div>}
+          {selected?.hasKey && selected.kind !== 'chatgpt' && (
             <button
               className="ghost-button clear-key"
               disabled={busy}

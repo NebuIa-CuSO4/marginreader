@@ -1,4 +1,4 @@
-import { memo, useEffect, useLayoutEffect, useMemo, useRef } from 'react'
+import { memo, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import {
   Camera,
   Copy,
@@ -26,7 +26,8 @@ interface ChatViewProps {
   pendingImage: { dataUrl: string; width: number; height: number } | null
   onRemoveImage: () => void
   onComposerChange: (value: string) => void
-  onSend: () => void
+  onSend: (webSearch: boolean) => void
+  canSearch: boolean
   onStop: () => void
   onCapture: () => void
   onSelectionHelp: () => void
@@ -128,12 +129,14 @@ export function ChatView({
   onRemoveImage,
   onComposerChange,
   onSend,
+  canSearch,
   onStop,
   onCapture,
   onSelectionHelp,
   onSaveAnswer,
   onSaveVocabAnswer
 }: ChatViewProps): React.JSX.Element {
+  const [webSearch, setWebSearch] = useState(false)
   const scrollRef = useRef<HTMLDivElement>(null)
   const textareaRef = useRef<HTMLTextAreaElement>(null)
   const nearBottomRef = useRef(true)
@@ -243,7 +246,8 @@ export function ChatView({
 
   function handleSend(): void {
     nearBottomRef.current = true
-    onSend()
+    onSend(canSearch && webSearch)
+    setWebSearch(false)
   }
 
   return (
@@ -342,6 +346,12 @@ export function ChatView({
               </button>
             </div>
             <div className="composer-right">
+              {canSearch && (
+                <label className="check-row" title="搜索问题可能包含当前对话的相关上下文">
+                  <input type="checkbox" checked={webSearch} disabled={sending} onChange={(event) => setWebSearch(event.target.checked)} />
+                  联网搜索
+                </label>
+              )}
               <span className="send-hint">Enter 发送</span>
               {sending ? (
                 <button className="send-button stop" title="停止生成" onClick={onStop}>

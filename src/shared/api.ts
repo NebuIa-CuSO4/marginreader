@@ -40,6 +40,7 @@ export interface FolderDeleteResult {
 }
 
 export interface SendMessageInput {
+  webSearch?: boolean
   projectId: string
   text: string
   displayText?: string
@@ -100,6 +101,8 @@ export interface MarginApi {
     onStream: (callback: (event: StreamEvent) => void) => () => void
   }
   api: {
+    connectChatGPT: () => Promise<ApiProvider>
+    disconnectChatGPT: () => Promise<void>
     providers: () => Promise<ApiProvider[]>
     saveProvider: (input: Partial<ApiProvider> & { id: string; name: string; baseUrl: string }) => Promise<ApiProvider>
     deleteProvider: (id: string) => Promise<void>

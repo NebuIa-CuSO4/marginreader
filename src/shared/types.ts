@@ -8,7 +8,7 @@ export interface Project {
   createdAt: number
 }
 
-export type ApiProviderKind = 'deepseek' | 'openai-compatible'
+export type ApiProviderKind = 'deepseek' | 'openai-compatible' | 'chatgpt' | 'openai-responses'
 
 export interface ApiProvider {
   id: string
@@ -175,6 +175,7 @@ export type RequestPart =
   | { type: 'image_url'; imageUrl: string; description: string }
 
 export interface ChatRequestLog {
+  webSearch?: boolean
   requestId: string
   projectId: string
   assistantId: string

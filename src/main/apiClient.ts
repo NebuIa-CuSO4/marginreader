@@ -1,4 +1,5 @@
 import { net } from 'electron'
+import { OPENAI_RESOURCE } from './chatgptAuth'
 import type { ApiProvider, ApiUsage } from '../shared/types'
 
 export type ApiContentPart =
@@ -51,6 +52,37 @@ function statusError(status: number, text: string): ApiError {
   return new ApiError('API_HTTP', `API 请求失败（HTTP ${status}）：${text.slice(0, 180)}`)
 }
 
+export function supportsWebSearch(provider: ApiProvider): boolean {
+  return provider.kind === 'chatgpt' || provider.kind === 'openai-responses'
+}
+
+export async function listChatGPTModels(accessToken: string): Promise<string[]> {
+  const response = await net.fetch(OPENAI_RESOURCE + '/models', {
+    headers: { Authorization: `Bearer ${accessToken}` },
+    redirect: 'error', signal: AbortSignal.timeout(20_000)
+  })
+  if (!response.ok) throw new ApiError('CHATGPT_MODELS', `无法获取 ChatGPT 模型（HTTP ${response.status}）。`)
+  const data = await response.json() as { models?: Array<{ slug: string; visibility: string }> }
+  const models = [...new Set((data.models ?? []).filter((item) => item.visibility === 'list' && item.slug).map((item) => item.slug))]
+  if (!models.length) throw new ApiError('CHATGPT_MODELS', '当前账号没有可供 Margin 使用的模型。')
+  return models
+}
+
+function responsesBody(model: string, messages: ApiMessage[], webSearch: boolean) {
+  return {
+    model, stream: true, store: false,
+    input: messages.map(({ role, content }) => {
+      if (role !== 'user' || typeof content === 'string') {
+        return { role: role === 'system' ? 'developer' : role, content }
+      }
+      return { role, content: content.map((part) => part.type === 'text'
+        ? { type: 'input_text', text: part.text }
+        : { type: 'input_image', image_url: part.image_url.url, detail: 'auto' }) }
+    }),
+    ...(webSearch ? { tools: [{ type: 'web_search' }], tool_choice: { type: 'web_search' } } : {})
+  }
+}
+
 export async function streamChat(
   provider: ApiProvider,
   apiKey: string,
@@ -58,25 +90,33 @@ export async function streamChat(
   messages: ApiMessage[],
   signal: AbortSignal,
   onDelta: (text: string) => void,
-  onReasoning: (text: string) => void
+  onReasoning: (text: string) => void,
+  webSearch = false
 ): Promise<StreamResult> {
-  const response = await net.fetch(endpoint(provider.baseUrl), {
+  const responses = supportsWebSearch(provider)
+  if (webSearch && !responses) throw new ApiError('SEARCH_UNSUPPORTED', '当前服务不支持内置联网搜索。')
+  const response = await net.fetch(responses ? OPENAI_RESOURCE + '/responses' : endpoint(provider.baseUrl), {
+    ...(responses ? { redirect: 'error' as const } : {}),
     method: 'POST',
     headers: {
       Authorization: `Bearer ${apiKey}`,
       'Content-Type': 'application/json',
       Accept: 'text/event-stream'
     },
-    body: JSON.stringify({
-      model,
-      messages,
-      stream: true
-    }),
+    body: JSON.stringify(responses ? responsesBody(model, messages, webSearch) : { model, messages, stream: true }),
     signal
+  }).catch((error: unknown) => {
+    if (signal.aborted && signal.reason?.name === 'AbortError') {
+      throw new ApiError('API_ABORTED', '已停止生成。')
+    }
+    throw error
   })
 
   if (!response.ok) {
     const text = await response.text().catch(() => '')
+    if (provider.kind === 'chatgpt' && [401, 403, 429].includes(response.status)) {
+      throw new ApiError('CHATGPT_ACCESS', `ChatGPT 授权、模型权限或额度不可用（HTTP ${response.status}）：${text.slice(0, 180)}`)
+    }
     throw statusError(response.status, text)
   }
   if (!response.body) throw new ApiError('API_STREAM', 'API 没有返回流式响应。')
@@ -94,12 +134,57 @@ export async function streamChat(
     if (!trimmed.startsWith('data:')) return false
     const data = trimmed.slice(5).trim()
     if (!data) return false
-    if (data === '[DONE]') return true
+    if (data === '[DONE]') return !responses
     let payload: any
     try {
       payload = JSON.parse(data)
     } catch {
       return false
+    }
+    if (responses) {
+      if (payload.type === 'response.output_text.delta' && typeof payload.delta === 'string') {
+        content += payload.delta
+        onDelta(content)
+      }
+      if (payload.type === 'response.reasoning_summary_text.delta' && typeof payload.delta === 'string') {
+        reasoning += payload.delta
+        onReasoning(reasoning)
+      }
+      if (['error', 'response.failed', 'response.incomplete'].includes(payload.type)) {
+        const error = payload.response?.error ?? payload
+        throw new ApiError(String(error.code ?? 'API_RESPONSE'), String(
+          error.message ?? payload.response?.incomplete_details?.reason ?? '生成未完成。'
+        ))
+      }
+      if (payload.type !== 'response.completed') return false
+      const sources = new Map<string, string>()
+      const outputText: string[] = []
+      for (const item of payload.response?.output ?? []) {
+        if (item.type !== 'message') continue
+        for (const part of item.content ?? []) {
+          if (part.type === 'output_text' && typeof part.text === 'string') outputText.push(part.text)
+          for (const annotation of part.annotations ?? []) {
+            if (annotation.type === 'url_citation' && typeof annotation.url === 'string' && /^https?:\/\//i.test(annotation.url)) {
+              sources.set(annotation.url, String(annotation.title || annotation.url))
+            }
+          }
+        }
+      }
+      if (outputText.length) content = outputText.join('\n\n')
+      if (sources.size) {
+        content += '\n\n**来源**\n\n' + [...sources].map(([url, title]) =>
+          '- [' + title.replace(/[\[\]\\\r\n]/g, ' ') + '](<' + url.replace(/[<>\s]/g, encodeURIComponent) + '>)'
+        ).join('\n')
+      }
+      const totals = payload.response?.usage
+      if (totals) usage = {
+        promptTokens: totals.input_tokens ?? 0,
+        completionTokens: totals.output_tokens ?? 0,
+        totalTokens: totals.total_tokens ?? 0
+      }
+      finishReason = 'completed'
+      if (!content) throw new ApiError('API_EMPTY', 'API 没有返回内容。')
+      return true
     }
     if (payload?.usage) {
       usage = {
@@ -148,7 +233,8 @@ export async function streamChat(
         }
       }
     }
-    if (buffer) processLine(buffer)
+    if (buffer && processLine(buffer)) return { content, reasoning, usage, finishReason }
+    if (responses) throw new ApiError('API_STREAM', 'Responses API 连接在生成完成前关闭。')
   } catch (error) {
     if ((error as Error).name === 'AbortError') {
       throw new ApiError('API_ABORTED', '已停止生成。')
@@ -171,6 +257,13 @@ async function probeVision(
   const image =
     'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg=='
   try {
+    if (supportsWebSearch(provider)) {
+      await streamChat(provider, apiKey, model, [{ role: 'user', content: [
+        { type: 'text', text: '这张图是什么颜色？只回答颜色。' },
+        { type: 'image_url', image_url: { url: image } }
+      ] }], AbortSignal.timeout(30_000), () => {}, () => {})
+      return { ok: true, message: `模型 ${model} 接受了图片输入。` }
+    }
     const response = await net.fetch(endpoint(provider.baseUrl), {
       method: 'POST',
       headers: {
@@ -248,17 +341,31 @@ export async function testApiProvider(
 ): Promise<{ models: string[]; chat: { ok: boolean; message: string }; vision?: { ok: boolean; message: string } }> {
   let models: string[] = []
   try {
-    const response = await net.fetch(modelsEndpoint(provider.baseUrl), {
-      headers: { Authorization: `Bearer ${apiKey}`, Accept: 'application/json' }
-    })
-    if (response.ok) {
-      const payload = (await response.json()) as { data?: Array<{ id?: string }> }
-      models = (payload.data ?? []).map((item) => String(item.id ?? '')).filter(Boolean)
+    if (provider.kind === 'chatgpt') {
+      models = await listChatGPTModels(apiKey)
+    } else {
+      const baseUrl = provider.kind === 'openai-responses' ? OPENAI_RESOURCE : provider.baseUrl
+      const response = await net.fetch(modelsEndpoint(baseUrl), {
+        headers: { Authorization: `Bearer ${apiKey}`, Accept: 'application/json' },
+        ...(provider.kind === 'openai-responses' ? { redirect: 'error' as const } : {})
+      })
+      if (response.ok) {
+        const payload = (await response.json()) as { data?: Array<{ id?: string }> }
+        models = (payload.data ?? []).map((item) => String(item.id ?? '')).filter(Boolean)
+      }
     }
-  } catch {
+  } catch (error) {
+    if (provider.kind === 'chatgpt') throw error
     models = []
   }
-  const target = model || provider.defaultModel || provider.models[0] || ''
+  const target = model || provider.defaultModel || provider.models[0] || models[0] || ''
+  if (supportsWebSearch(provider)) {
+    const signal = AbortSignal.timeout(30_000)
+    const messages: ApiMessage[] = [{ role: 'user', content: 'Reply with OK.' }]
+    await streamChat(provider, apiKey, target, messages, signal, () => {}, () => {})
+    return { models, chat: { ok: true, message: `模型 ${target} 可用。` },
+      vision: probeImages ? await probeVision(provider, apiKey, target) : undefined }
+  }
   const chat = await testChatEndpoint(provider, apiKey, target)
   const vision = probeImages ? await probeVision(provider, apiKey, target) : undefined
   return { models, chat, vision }
