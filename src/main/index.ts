@@ -673,7 +673,13 @@ function registerIpc(): void {
       return { today, balances: [], balanceError: error instanceof Error ? error.message : String(error) }
     }
   })
-  ipcMain.handle('quota:codex', () => readCodexQuota())
+  ipcMain.handle('quota:codex', async () => {
+    try {
+      return { ok: true, data: await readCodexQuota() }
+    } catch (error) {
+      return { ok: false, error: error instanceof Error ? error.message : '暂时无法读取 Codex 额度。' }
+    }
+  })
 
   ipcMain.handle('api:providers', () => listProviders())
 

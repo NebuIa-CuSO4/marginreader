@@ -268,9 +268,11 @@ function QuotaPanel({ providers, activeProvider }: { providers: ApiProvider[]; a
     setCodex(null)
     setCodexError('')
     void window.margin.quota.codex().then((result) => {
-      if (alive) setCodex(result)
-    }, (err: unknown) => {
-      if (alive) setCodexError(errorText(err))
+      if (!alive) return
+      if (result.ok && result.data) setCodex(result.data)
+      else setCodexError(result.error ?? '暂时无法读取 Codex 额度。')
+    }, () => {
+      if (alive) setCodexError('无法连接额度查询，请重试。')
     })
     return () => { alive = false }
   }, [deepSeekId, codexReload])

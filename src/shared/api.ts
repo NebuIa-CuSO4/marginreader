@@ -92,7 +92,7 @@ export interface MarginApi {
   }
   quota: {
     deepSeek: (providerId: string) => Promise<DeepSeekQuota>
-    codex: () => Promise<CodexQuota>
+    codex: () => Promise<IpcResult<CodexQuota>>
   }
   excerpt: {
     run: (input: ExcerptInput) => Promise<ExcerptResult>

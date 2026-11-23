@@ -3,6 +3,7 @@ import { tmpdir } from 'node:os'
 import { createInterface } from 'node:readline'
 import { app, net } from 'electron'
 import type { ApiUsage, CodexQuota, CostRange, DeepSeekQuota, QuotaWindow } from '../shared/types'
+import { codexExecutables } from './codexExecutable'
 import { readRequestLogs } from './requestLog'
 
 interface CodexWindow {
@@ -32,49 +33,99 @@ export function parseCodexQuota(result: {
   return { fiveHours: windowFor(300), week: windowFor(10_080) }
 }
 
-export async function readCodexQuota(): Promise<CodexQuota> {
+class CodexLaunchError extends Error {}
+
+async function queryCodexQuota(executable: string): Promise<CodexQuota> {
   return new Promise((resolve, reject) => {
-    const child = spawn('codex.exe', ['app-server', '--listen', 'stdio://'], {
+    const child = spawn(executable, ['app-server', '--listen', 'stdio://'], {
       cwd: tmpdir(),
       windowsHide: true,
       stdio: ['pipe', 'pipe', 'ignore']
     })
     const lines = createInterface({ input: child.stdout })
+    let initialized = false
+    let settled = false
+    let timeout = setTimeout(() => fail(new CodexLaunchError('Codex 启动超时。')), 4_000)
+
     function cleanup(): void {
+      settled = true
       clearTimeout(timeout)
       lines.close()
       child.kill()
     }
-    function fail(message: string): void {
+    function fail(error: Error): void {
+      if (settled) return
       cleanup()
-      reject(new Error(message))
+      reject(error)
+    }
+    function failConnection(): void {
+      fail(initialized ? new Error('Codex 连接已断开，请重试。') : new CodexLaunchError('无法启动 Codex。'))
     }
     function send(input: object): void {
       child.stdin.write(JSON.stringify(input) + '\n')
     }
-    const timeout = setTimeout(() => fail('读取 Codex 额度超时，请重试。'), 12_000)
-    child.once('error', () => fail('找不到 Codex CLI。请在 ChatGPT 用量页面查看。'))
-    child.once('exit', () => fail('Codex 退出，未返回额度。'))
-    child.stdin.on('error', () => fail('无法连接 Codex CLI。'))
+
+    child.once('error', failConnection)
+    child.once('exit', failConnection)
+    child.stdin.on('error', failConnection)
     lines.on('line', (line) => {
-      try {
-        const reply = JSON.parse(line)
-        if (reply.id === 1) {
-          if (reply.error) return fail('Codex 额度接口初始化失败。')
-          send({ method: 'initialized' })
-          send({ id: 2, method: 'account/rateLimits/read' })
+      const reply = parseReply(line)
+      if (!reply || settled) return
+      if (reply.id === 1) {
+        if (reply.error || !reply.result) {
+          fail(new CodexLaunchError('此 Codex 版本无法初始化额度接口。'))
+          return
         }
-        if (reply.id !== 2) return
-        if (reply.error || !reply.result) return fail('无法读取额度。请确认 Codex 已用 ChatGPT 账号登录。')
-        const quota = parseCodexQuota(reply.result)
-        cleanup()
-        resolve(quota)
-      } catch {
-        fail('Codex 返回了无法读取的额度响应。')
+        initialized = true
+        clearTimeout(timeout)
+        timeout = setTimeout(() => fail(new Error('读取 Codex 额度超时，请重试。')), 12_000)
+        send({ method: 'initialized' })
+        send({ id: 2, method: 'account/rateLimits/read' })
       }
+      if (reply.id !== 2) return
+      if (reply.error?.code === -32601) {
+        fail(new CodexLaunchError('此 Codex 版本不支持额度查询。'))
+        return
+      }
+      if (reply.error || !reply.result) {
+        const message = reply.error?.message ?? ''
+        fail(new Error(/auth|log.?in|signed.?in|401/i.test(message)
+          ? '请在本机 Codex 中登录 ChatGPT，再刷新额度。'
+          : 'Codex 暂未返回额度，请稍后重试。'))
+        return
+      }
+      cleanup()
+      resolve(parseCodexQuota(reply.result))
     })
     send({ id: 1, method: 'initialize', params: { clientInfo: { name: 'margin', title: 'Margin', version: app.getVersion() } } })
   })
+}
+
+function parseReply(line: string): {
+  id?: number
+  result?: Parameters<typeof parseCodexQuota>[0]
+  error?: { code?: number; message?: string }
+} | null {
+  try {
+    return JSON.parse(line)
+  } catch {
+    return null
+  }
+}
+
+export async function readCodexQuota(): Promise<CodexQuota> {
+  let found = false
+  for await (const executable of codexExecutables()) {
+    found = true
+    try {
+      return await queryCodexQuota(executable)
+    } catch (error) {
+      if (!(error instanceof CodexLaunchError)) throw error
+    }
+  }
+  throw new Error(found
+    ? '找到了 Codex，但无法启动额度查询。请更新 Codex，或打开 ChatGPT 用量。'
+    : '未找到可用的 Codex。请安装 Codex 桌面版或 CLI 并登录，或打开 ChatGPT 用量。')
 }
 
 interface TokenRates {
