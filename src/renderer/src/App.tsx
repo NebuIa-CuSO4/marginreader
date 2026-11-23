@@ -33,7 +33,7 @@ import { supportsWebSearch } from '../../shared/types'
 import { ChatView } from './components/ChatView'
 import { NotesView } from './components/NotesView'
 import { VocabView } from './components/VocabView'
-import { WorkspaceRail, type RailPanel } from './components/WorkspaceRail'
+import { WorkspacePanel, WorkspaceRail, type RailPanel } from './components/WorkspaceRail'
 import { SettingsModal } from './components/SettingsModal'
 import { NoteEditorModal } from './components/NoteEditorModal'
 import { NoteDetailModal } from './components/NoteDetailModal'
@@ -139,12 +139,15 @@ export default function App(): React.JSX.Element {
       document.documentElement.dataset.theme = settings.theme
     }
   }, [settings])
-  useEffect(() => {
-    composerRef.current = composer
-  }, [composer])
-  useEffect(() => {
-    pendingImageRef.current = pendingImage
-  }, [pendingImage])
+  function updateComposer(text: string): void {
+    composerRef.current = text
+    setComposer(text)
+  }
+
+  function updatePendingImage(image: PendingImage | null): void {
+    pendingImageRef.current = image
+    setPendingImage(image)
+  }
 
   const activeProject = useMemo(
     () => projects.find((project) => project.id === activeProjectId),
@@ -263,7 +266,7 @@ export default function App(): React.JSX.Element {
       }
       if (result.text.trim()) {
         setTab('chat')
-        setComposer(`屏幕内容：\n${result.text}\n\n我的问题：`)
+        updateComposer(`屏幕内容：\n${result.text}\n\n我的问题：`)
         showToast('已读取屏幕文字')
         window.setTimeout(
           () => document.querySelector<HTMLTextAreaElement>('.composer textarea')?.focus(),
@@ -297,14 +300,15 @@ export default function App(): React.JSX.Element {
           : `请解释下面这段文字的意思、上下文含义和可能的难点：\n\n"""${action.text}"""`
       const sendText = `${prompt}\n\n${VOCAB_FORMAT_INSTRUCTION}`
       setTab('chat')
-      composerRef.current = sendText
-      setComposer(sendText)
+      updateComposer(sendText)
       void window.margin.window.expand(true)
       const currentSettings = settingsRef.current
       if (currentSettings?.autoSendSelection) {
         const projectId = activeIdRef.current
         window.setTimeout(() => {
-          if (activeIdRef.current === projectId) void performSend(sendText, action.text)
+          if (activeIdRef.current === projectId && composerRef.current === sendText) {
+            void performSend(sendText, action.text)
+          }
         }, 120)
       }
     })
@@ -323,10 +327,8 @@ export default function App(): React.JSX.Element {
     drafts.current.set(activeIdRef.current, { text: composerRef.current, image: pendingImageRef.current })
     applyBootstrap(data)
     const draft = drafts.current.get(projectId)
-    composerRef.current = draft?.text ?? ''
-    pendingImageRef.current = draft?.image ?? null
-    setComposer(composerRef.current)
-    setPendingImage(pendingImageRef.current)
+    updateComposer(draft?.text ?? '')
+    updatePendingImage(draft?.image ?? null)
     setTab('chat')
     setRailPanel(null)
   }
@@ -346,8 +348,25 @@ export default function App(): React.JSX.Element {
       return false
     }
     const assistantId = crypto.randomUUID()
-    const originalDraft = composerRef.current
+    const submittedDraft = {
+      text: composerRef.current,
+      image: imageDataUrl ? pendingImageRef.current : null
+    }
     activeSends.current.set(projectId, assistantId)
+    updateComposer('')
+    if (submittedDraft.image) updatePendingImage(null)
+
+    function restoreDraft(): void {
+      if (activeIdRef.current === projectId) {
+        if (!composerRef.current) updateComposer(submittedDraft.text)
+        if (!pendingImageRef.current && composerRef.current === submittedDraft.text && submittedDraft.image) {
+          updatePendingImage(submittedDraft.image)
+        }
+      } else {
+        const draft = drafts.current.get(projectId)
+        if (!draft?.text && !draft?.image) drafts.current.set(projectId, submittedDraft)
+      }
+    }
     const userId = crypto.randomUUID()
     const timestamp = Date.now()
     const shownText = displayText?.trim() || clean
@@ -385,11 +404,8 @@ export default function App(): React.JSX.Element {
         imageDataUrl,
         webSearch
       })
-      if (activeIdRef.current !== projectId) {
-        const draft = drafts.current.get(projectId)
-        if (result.ok && draft?.text === originalDraft && draft.image?.dataUrl === imageDataUrl) drafts.current.delete(projectId)
-        return result.ok
-      }
+      if (!result.ok) restoreDraft()
+      if (activeIdRef.current !== projectId) return result.ok
       if (!result.ok) {
         setMessages((previous) =>
           previous.map((message) => {
@@ -408,22 +424,15 @@ export default function App(): React.JSX.Element {
           message.id === userId ? { ...message, status: 'complete' } : message
         )
       )
-      if (composerRef.current === originalDraft) {
-        composerRef.current = ''
-        setComposer('')
-      }
-      if (imageDataUrl && pendingImageRef.current?.dataUrl === imageDataUrl) {
-        setPendingImage(null)
-        pendingImageRef.current = null
-      }
       return true
     } catch (error) {
+      restoreDraft()
       if (activeIdRef.current !== projectId) return false
       const message = error instanceof Error ? error.message : String(error)
       setMessages((previous) =>
         previous.map((item) => {
-          if (item.id === userId) return { ...item, status: 'complete' }
-          if (item.id === assistantId) return { ...item, status: 'error', content: message }
+          if (item.id === userId) return { ...item, status: 'error' }
+          if (item.id === assistantId) return { ...item, status: 'error', content: item.content || message }
           return item
         })
       )
@@ -647,10 +656,8 @@ export default function App(): React.JSX.Element {
     const data = await window.margin.app.activateProject(nextProject)
     if (nextProject !== activeIdRef.current) {
       const draft = drafts.current.get(nextProject)
-      composerRef.current = draft?.text ?? ''
-      pendingImageRef.current = draft?.image ?? null
-      setComposer(composerRef.current)
-      setPendingImage(pendingImageRef.current)
+      updateComposer(draft?.text ?? '')
+      updatePendingImage(draft?.image ?? null)
     }
     applyBootstrap(data)
     showToast('项目及其本地对话已删除')
@@ -785,13 +792,6 @@ export default function App(): React.JSX.Element {
         pinned={settings.pinned}
         onPin={() => void window.margin.window.setPinned(!settings.pinned)}
         onSettings={() => setSettingsOpen(true)}
-        projects={projects}
-        activeProjectId={activeProjectId}
-        onActivate={switchProject}
-        onCreate={createProject}
-        onDelete={requestDeleteProject}
-        providers={apiProviders}
-        activeProvider={activeProvider}
       />
       <div className="workspace-main">
         <header className="app-header">
@@ -859,7 +859,10 @@ export default function App(): React.JSX.Element {
         </div>
 
         <nav className="tabs">
-          <button className={tab === 'chat' ? 'active' : ''} onClick={() => setTab('chat')}>
+          <button className={tab === 'chat' ? 'active' : ''} onClick={() => {
+            setTab('chat')
+            setRailPanel(null)
+          }}>
             <MessageSquare size={15} />
             对话
           </button>
@@ -875,7 +878,22 @@ export default function App(): React.JSX.Element {
           </button>
         </nav>
 
-        <main className="app-main">
+        <main className="app-main" onPointerDownCapture={(event) => {
+          if (railPanel && event.target instanceof Element && !event.target.closest('.workspace-panel')) {
+            setRailPanel(null)
+          }
+        }}>
+          <WorkspacePanel
+            panel={railPanel}
+            onPanelChange={setRailPanel}
+            projects={projects}
+            activeProjectId={activeProjectId}
+            onActivate={switchProject}
+            onCreate={createProject}
+            onDelete={requestDeleteProject}
+            providers={apiProviders}
+            activeProvider={activeProvider}
+          />
           {tab === 'chat' && (
             <ChatView
               key={activeProjectId}
@@ -887,11 +905,8 @@ export default function App(): React.JSX.Element {
               composer={composer}
               apiReady={status.phase === 'ready'}
               pendingImage={pendingImage}
-              onRemoveImage={() => {
-                setPendingImage(null)
-                pendingImageRef.current = null
-              }}
-              onComposerChange={setComposer}
+              onRemoveImage={() => updatePendingImage(null)}
+              onComposerChange={updateComposer}
               onSend={requestSend}
               canSearch={Boolean(activeProvider && supportsWebSearch(activeProvider))}
               onStop={() => void stopGeneration()}
@@ -1113,8 +1128,7 @@ export default function App(): React.JSX.Element {
               onClick={() => {
                 const image = captureChoice
                 setCaptureChoice(null)
-                setPendingImage(image)
-                pendingImageRef.current = image
+                updatePendingImage(image)
                 setTab('chat')
                 showToast('截图已附加，输入问题后发送。')
                 window.setTimeout(

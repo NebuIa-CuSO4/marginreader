@@ -2,7 +2,7 @@ import { spawn } from 'node:child_process'
 import { tmpdir } from 'node:os'
 import { createInterface } from 'node:readline'
 import { app, net } from 'electron'
-import type { CodexQuota, DeepSeekQuota, QuotaWindow } from '../shared/types'
+import type { ApiUsage, CodexQuota, CostRange, DeepSeekQuota, QuotaWindow } from '../shared/types'
 import { readRequestLogs } from './requestLog'
 
 interface CodexWindow {
@@ -77,16 +77,76 @@ export async function readCodexQuota(): Promise<CodexQuota> {
   })
 }
 
+interface TokenRates {
+  cacheHit: number
+  cacheMiss: number
+  output: number
+}
+
+// Official off-peak prices per million tokens. Peak prices are double these rates.
+// https://api-docs.deepseek.com/zh-cn/quick_start/pricing/
+// https://api-docs.deepseek.com/quick_start/pricing/
+const deepSeekRates = {
+  flash: {
+    CNY: { cacheHit: 0.02, cacheMiss: 1, output: 4 },
+    USD: { cacheHit: 0.003, cacheMiss: 0.15, output: 0.6 }
+  },
+  pro: {
+    CNY: { cacheHit: 0.15, cacheMiss: 4.5, output: 13.5 },
+    USD: { cacheHit: 0.022, cacheMiss: 0.66, output: 1.98 }
+  }
+}
+const beijingOffsetMs = 8 * 3_600_000
+
+function estimateDeepSeekCost(model: string, usage: ApiUsage, timestamp: number): DeepSeekQuota['today']['estimatedCost'] | null {
+  const rates = model === 'deepseek-v4-pro' ? deepSeekRates.pro
+    : ['deepseek-flash', 'deepseek-v4-flash', 'deepseek-v4-flash-vision-exp'].includes(model) ? deepSeekRates.flash : null
+  const { promptTokens, completionTokens, cachedPromptTokens } = usage
+  if (!rates || ![promptTokens, completionTokens].every((count) => Number.isFinite(count) && count >= 0)) return null
+  const cached = typeof cachedPromptTokens === 'number' && Number.isFinite(cachedPromptTokens) &&
+    cachedPromptTokens >= 0 && cachedPromptTokens <= promptTokens ? cachedPromptTokens : undefined
+  const beijingTime = new Date(timestamp + beijingOffsetMs)
+  const day = beijingTime.getUTCDay()
+  const hour = beijingTime.getUTCHours()
+  // A weekday in a peak window may be a public holiday. Show both tariffs in that case.
+  const possiblePeak = day >= 1 && day <= 5 && ((hour >= 9 && hour < 12) || (hour >= 14 && hour < 18))
+  function estimate({ cacheHit, cacheMiss, output }: TokenRates): CostRange {
+    const inputCost = (hits: number) => hits * cacheHit + (promptTokens - hits) * cacheMiss
+    const outputCost = completionTokens * output
+    return {
+      min: (inputCost(cached ?? promptTokens) + outputCost) / 1_000_000,
+      max: (inputCost(cached ?? 0) + outputCost) / 1_000_000 * (possiblePeak ? 2 : 1)
+    }
+  }
+  return { CNY: estimate(rates.CNY), USD: estimate(rates.USD) }
+}
+
 export async function deepSeekToday(logDir: string, providerId: string, timestamp = Date.now()): Promise<DeepSeekQuota['today']> {
   const day = 86_400_000
-  const offset = 8 * 3_600_000
-  const start = Math.floor((timestamp + offset) / day) * day - offset
+  const start = Math.floor((timestamp + beijingOffsetMs) / day) * day - beijingOffsetMs
   const end = start + day
   const logs = await readRequestLogs(logDir, Infinity, start, end)
-  return logs.reduce((total, log) => {
-    if (log.providerId !== providerId || !log.usage || !Number.isFinite(log.usage.totalTokens)) return total
-    return { requests: total.requests + 1, tokens: total.tokens + log.usage.totalTokens }
-  }, { requests: 0, tokens: 0 })
+  const today: DeepSeekQuota['today'] = {
+    requests: 0,
+    tokens: 0,
+    estimatedCost: { CNY: { min: 0, max: 0 }, USD: { min: 0, max: 0 } },
+    unpricedRequests: 0
+  }
+  for (const log of logs) {
+    if (log.providerId !== providerId || !log.usage || !Number.isFinite(log.usage.totalTokens) || log.usage.totalTokens < 0) continue
+    today.requests++
+    today.tokens += log.usage.totalTokens
+    const estimate = estimateDeepSeekCost(log.model, log.usage, log.createdAt)
+    if (!estimate) {
+      today.unpricedRequests++
+      continue
+    }
+    for (const currency of ['CNY', 'USD'] as const) {
+      today.estimatedCost[currency].min += estimate[currency].min
+      today.estimatedCost[currency].max += estimate[currency].max
+    }
+  }
+  return today
 }
 
 export async function readDeepSeekBalance(key: string): Promise<DeepSeekQuota['balances']> {

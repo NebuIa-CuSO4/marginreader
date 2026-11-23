@@ -5,9 +5,19 @@ export interface TodoItem {
   createdAt: number
 }
 
+export interface CostRange {
+  min: number
+  max: number
+}
+
 export interface DeepSeekQuota {
   balances: Array<{ currency: string; total: string }>
-  today: { requests: number; tokens: number }
+  today: {
+    requests: number
+    tokens: number
+    estimatedCost: { CNY: CostRange; USD: CostRange }
+    unpricedRequests: number
+  }
   balanceError?: string
 }
 
@@ -77,6 +87,7 @@ export interface ApiStatus {
 
 export interface ApiUsage {
   promptTokens: number
+  cachedPromptTokens?: number
   completionTokens: number
   totalTokens: number
 }

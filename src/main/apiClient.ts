@@ -256,8 +256,10 @@ export async function streamChat(
       throw new ApiError(String(payload.error.code ?? 'API_RESPONSE'), String(payload.error.message ?? '生成未完成。'))
     }
     if (payload?.usage) {
+      const cached = payload.usage.prompt_cache_hit_tokens ?? payload.usage.prompt_tokens_details?.cached_tokens
       usage = {
         promptTokens: Number(payload.usage.prompt_tokens ?? 0),
+        ...(typeof cached === 'number' && Number.isFinite(cached) && cached >= 0 ? { cachedPromptTokens: cached } : {}),
         completionTokens: Number(payload.usage.completion_tokens ?? 0),
         totalTokens: Number(payload.usage.total_tokens ?? 0)
       }

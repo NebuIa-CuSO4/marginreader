@@ -11,6 +11,11 @@ interface WorkspaceRailProps {
   pinned: boolean
   onPin: () => void
   onSettings: () => void
+}
+
+interface WorkspacePanelProps {
+  panel: RailPanel | null
+  onPanelChange: (panel: RailPanel | null) => void
   projects: Project[]
   activeProjectId: string
   onActivate: (id: string) => Promise<void>
@@ -29,45 +34,48 @@ export function WorkspaceRail(props: WorkspaceRailProps): React.JSX.Element {
   }
 
   return (
-    <>
-      <nav className="workspace-rail" aria-label="侧边工具">
-        <button type="button" className="icon-button" title="设置" aria-label="设置" onClick={props.onSettings}>
-          <Settings size={17} />
+    <nav className="workspace-rail" aria-label="侧边工具">
+      <button type="button" className="icon-button" title="设置" aria-label="设置" onClick={props.onSettings}>
+        <Settings size={17} />
+      </button>
+      <button type="button" className={`icon-button ${props.pinned ? 'active' : ''}`}
+        title={props.pinned ? '取消固定展开' : '固定展开'} aria-label="固定展开" aria-pressed={props.pinned}
+        onClick={props.onPin}>
+        {props.pinned ? <PinOff size={17} /> : <Pin size={17} />}
+      </button>
+      <button type="button" className={`icon-button ${panel === 'todos' ? 'active' : ''}`}
+        title="待办事项" aria-label="待办事项" aria-expanded={panel === 'todos'} aria-controls={panel === 'todos' ? 'workspace-panel' : undefined} onClick={() => toggle('todos')}>
+        <ClipboardList size={17} />
+      </button>
+      <button type="button" className={`icon-button rail-conversations ${panel === 'conversations' ? 'active' : ''}`}
+        title="切换会话" aria-label="切换会话" aria-expanded={panel === 'conversations'} aria-controls={panel === 'conversations' ? 'workspace-panel' : undefined} onClick={() => toggle('conversations')}>
+        <BookOpen size={17} />
+      </button>
+      <button type="button" className={`icon-button rail-quota ${panel === 'quota' ? 'active' : ''}`}
+        title="余额与额度" aria-label="余额与额度" aria-expanded={panel === 'quota'} aria-controls={panel === 'quota' ? 'workspace-panel' : undefined} onClick={() => toggle('quota')}>
+        <Wallet size={17} />
+      </button>
+    </nav>
+  )
+}
+
+export function WorkspacePanel(props: WorkspacePanelProps): React.JSX.Element | null {
+  const { panel, onPanelChange } = props
+  if (!panel) return null
+  return (
+    <aside id="workspace-panel" className="workspace-panel" aria-label={panelTitles[panel]} onKeyDown={(event) => {
+      if (event.key === 'Escape') onPanelChange(null)
+    }}>
+      <header className="workspace-panel-header">
+        <h2>{panelTitles[panel]}</h2>
+        <button type="button" className="icon-button small" title="关闭侧栏" aria-label="关闭侧栏" onClick={() => onPanelChange(null)}>
+          <X size={16} />
         </button>
-        <button type="button" className={`icon-button ${props.pinned ? 'active' : ''}`}
-          title={props.pinned ? '取消固定展开' : '固定展开'} aria-label="固定展开" aria-pressed={props.pinned}
-          onClick={props.onPin}>
-          {props.pinned ? <PinOff size={17} /> : <Pin size={17} />}
-        </button>
-        <button type="button" className={`icon-button ${panel === 'todos' ? 'active' : ''}`}
-          title="待办事项" aria-label="待办事项" aria-expanded={panel === 'todos'} aria-controls={panel === 'todos' ? 'workspace-panel' : undefined} onClick={() => toggle('todos')}>
-          <ClipboardList size={17} />
-        </button>
-        <button type="button" className={`icon-button rail-conversations ${panel === 'conversations' ? 'active' : ''}`}
-          title="切换会话" aria-label="切换会话" aria-expanded={panel === 'conversations'} aria-controls={panel === 'conversations' ? 'workspace-panel' : undefined} onClick={() => toggle('conversations')}>
-          <BookOpen size={17} />
-        </button>
-        <button type="button" className={`icon-button rail-quota ${panel === 'quota' ? 'active' : ''}`}
-          title="余额与额度" aria-label="余额与额度" aria-expanded={panel === 'quota'} aria-controls={panel === 'quota' ? 'workspace-panel' : undefined} onClick={() => toggle('quota')}>
-          <Wallet size={17} />
-        </button>
-      </nav>
-      {panel && (
-        <aside id="workspace-panel" className="workspace-panel" aria-label={panelTitles[panel]} onKeyDown={(event) => {
-          if (event.key === 'Escape') onPanelChange(null)
-        }}>
-          <header className="workspace-panel-header">
-            <h2>{panelTitles[panel]}</h2>
-            <button type="button" className="icon-button small" title="关闭侧栏" aria-label="关闭侧栏" onClick={() => onPanelChange(null)}>
-              <X size={16} />
-            </button>
-          </header>
-          {panel === 'conversations' && <ConversationList {...props} />}
-          {panel === 'todos' && <TodoList />}
-          {panel === 'quota' && <QuotaPanel providers={props.providers} activeProvider={props.activeProvider} />}
-        </aside>
-      )}
-    </>
+      </header>
+      {panel === 'conversations' && <ConversationList {...props} />}
+      {panel === 'todos' && <TodoList />}
+      {panel === 'quota' && <QuotaPanel providers={props.providers} activeProvider={props.activeProvider} />}
+    </aside>
   )
 }
 
@@ -75,7 +83,7 @@ function errorText(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
 }
 
-function ConversationList({ projects, activeProjectId, onActivate, onCreate, onDelete }: WorkspaceRailProps): React.JSX.Element {
+function ConversationList({ projects, activeProjectId, onActivate, onCreate, onDelete }: WorkspacePanelProps): React.JSX.Element {
   const [creating, setCreating] = useState(false)
   const [title, setTitle] = useState('')
   const [author, setAuthor] = useState('')
@@ -214,6 +222,17 @@ function TodoList(): React.JSX.Element {
   )
 }
 
+function formatDeepSeekCost({ balances, today }: DeepSeekQuota): string {
+  if (today.requests > 0 && today.requests === today.unpricedRequests) return '暂无可估价记录'
+  const currency = balances.some((balance) => balance.currency === 'USD') &&
+    !balances.some((balance) => balance.currency === 'CNY') ? 'USD' : 'CNY'
+  const { min, max } = today.estimatedCost[currency]
+  const formatter = new Intl.NumberFormat('zh-CN', { style: 'currency', currency, maximumFractionDigits: 9 })
+  const lower = formatter.format(min)
+  const upper = formatter.format(max)
+  return lower === upper ? lower : `${lower} – ${upper}`
+}
+
 function QuotaPanel({ providers, activeProvider }: { providers: ApiProvider[]; activeProvider: ApiProvider | null }): React.JSX.Element {
   const deepSeekProviders = providers.filter(isOfficialDeepSeek)
   const [selected, setSelected] = useState(
@@ -276,9 +295,16 @@ function QuotaPanel({ providers, activeProvider }: { providers: ApiProvider[]; a
             <dl className="rail-quota-details" aria-live="polite">
               <div><dt>账户余额</dt><dd>{deepSeek?.balances.length ? deepSeek.balances.map(({ currency, total }) =>
                 <span key={currency}>{currency} {total}</span>) : deepSeek || error ? '不可用' : '查询中…'}</dd></div>
-              <div><dt>今日消耗 · Margin</dt><dd>{deepSeek ? `${deepSeek.today.tokens.toLocaleString()} tokens` : '—'}</dd></div>
+              <div>
+                <dt>今日消耗金额 · Margin 估算</dt>
+                <dd>{deepSeek ? formatDeepSeekCost(deepSeek) : '—'}</dd>
+                {deepSeek && <small>{deepSeek.today.tokens.toLocaleString()} tokens</small>}
+              </div>
             </dl>
-            {deepSeek && <p className="rail-empty">{deepSeek.today.requests} 次有用量记录的请求 · 北京时间</p>}
+            {deepSeek && <p className="rail-empty">
+              {deepSeek.today.requests} 次有用量记录的请求 · 北京时间
+              {deepSeek.today.unpricedRequests > 0 && ` · ${deepSeek.today.unpricedRequests} 次缺少计费信息`}
+            </p>}
             {(error || deepSeek?.balanceError) && <p className="form-error" role="alert">{error || deepSeek?.balanceError}</p>}
             <a href="https://platform.deepseek.com/usage" target="_blank" rel="noreferrer">查看 DeepSeek 账户账单</a>
           </>
