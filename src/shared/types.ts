@@ -1,3 +1,26 @@
+export interface TodoItem {
+  id: string
+  title: string
+  completed: boolean
+  createdAt: number
+}
+
+export interface DeepSeekQuota {
+  balances: Array<{ currency: string; total: string }>
+  today: { requests: number; tokens: number }
+  balanceError?: string
+}
+
+export interface QuotaWindow {
+  remaining: number
+  resetsAt: number | null
+}
+
+export interface CodexQuota {
+  fiveHours: QuotaWindow | null
+  week: QuotaWindow | null
+}
+
 export type ProjectKind = 'literature' | 'english'
 
 export interface Project {
@@ -25,9 +48,13 @@ export interface ApiProvider {
   updatedAt: number
 }
 
+export function isOfficialDeepSeek(provider: ApiProvider): boolean {
+  return /^https:\/\/api\.deepseek\.com(?:\/(?:v1|beta))?(?:\/chat\/completions)?\/?$/i.test(provider.baseUrl)
+}
+
 export function supportsWebSearch(provider: ApiProvider): boolean {
   return provider.kind === 'chatgpt' || provider.kind === 'openai-responses' ||
-    (provider.kind === 'deepseek' && /^https:\/\/api\.deepseek\.com(?:\/(?:v1|beta))?(?:\/chat\/completions)?\/?$/i.test(provider.baseUrl))
+    (provider.kind === 'deepseek' && isOfficialDeepSeek(provider))
 }
 
 export interface ApiConversation {

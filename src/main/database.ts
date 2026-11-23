@@ -15,6 +15,7 @@ import type {
   Project,
   ProjectKind,
   Settings,
+  TodoItem,
   Vocab
 } from '../shared/types'
 
@@ -73,6 +74,13 @@ export class AppDatabase {
         url TEXT,
         status TEXT NOT NULL DEFAULT 'unbound',
         updated_at INTEGER NOT NULL
+      );
+
+      CREATE TABLE IF NOT EXISTS todos (
+        id TEXT PRIMARY KEY,
+        title TEXT NOT NULL,
+        completed INTEGER NOT NULL DEFAULT 0,
+        created_at INTEGER NOT NULL
       );
 
       CREATE TABLE IF NOT EXISTS api_providers (
@@ -361,6 +369,38 @@ export class AppDatabase {
     } catch {
       // ignore
     }
+  }
+
+  listTodos(): TodoItem[] {
+    return this.db.prepare(
+      'SELECT id, title, completed, created_at FROM todos ORDER BY completed ASC, created_at DESC, id DESC'
+    ).all().map((row) => ({
+      id: String(row.id), title: String(row.title),
+      completed: Boolean(row.completed), createdAt: Number(row.created_at)
+    }))
+  }
+
+  addTodo(value: string): TodoItem {
+    const title = value.trim()
+    if (!title || title.length > 200) throw new Error('待办标题需要 1–200 个字符。')
+    const item = { id: randomUUID(), title, completed: false, createdAt: now() }
+    this.db.prepare('INSERT INTO todos (id, title, completed, created_at) VALUES (?, ?, 0, ?)')
+      .run(item.id, item.title, item.createdAt)
+    return item
+  }
+
+  updateTodo(id: string, patch: { title?: string; completed?: boolean }): TodoItem {
+    const row = this.db.prepare('SELECT title, completed, created_at FROM todos WHERE id = ?').get(id)
+    if (!row) throw new Error('待办已不存在。')
+    const title = patch.title?.trim() ?? String(row.title)
+    if (!title || title.length > 200) throw new Error('待办标题需要 1–200 个字符。')
+    const completed = patch.completed ?? Boolean(row.completed)
+    this.db.prepare('UPDATE todos SET title = ?, completed = ? WHERE id = ?').run(title, Number(completed), id)
+    return { id, title, completed, createdAt: Number(row.created_at) }
+  }
+
+  removeTodo(id: string): void {
+    this.db.prepare('DELETE FROM todos WHERE id = ?').run(id)
   }
 
   listProjects(): Project[] {
@@ -1186,6 +1226,7 @@ export class AppDatabase {
     return {
       exportedAt: new Date().toISOString(),
       projects: this.listProjects(),
+      todos: this.listTodos(),
       apiProviders: this.listApiProviders().map(({ hasKey: _hasKey, ...provider }) => provider),
       conversations: this.listProjects()
         .map((project) => this.getConversation(project.id))

@@ -50,6 +50,16 @@ const api: MarginApi = {
       ipcRenderer.invoke('app:save-text-file', input) as Promise<string | null>,
     copyText: (text) => ipcRenderer.invoke('app:copy-text', text) as Promise<void>
   },
+  todos: {
+    list: () => ipcRenderer.invoke('todos:list'),
+    add: (title) => ipcRenderer.invoke('todos:add', title),
+    update: (id, patch) => ipcRenderer.invoke('todos:update', id, patch),
+    remove: (id) => ipcRenderer.invoke('todos:remove', id)
+  },
+  quota: {
+    deepSeek: (id) => ipcRenderer.invoke('quota:deepseek', id),
+    codex: () => ipcRenderer.invoke('quota:codex')
+  },
   excerpt: {
     run: (input: ExcerptInput) =>
       ipcRenderer.invoke('excerpt:run', input) as Promise<ExcerptResult>

@@ -23,6 +23,7 @@ import type {
   ChatMessage,
   ChatRequestLog,
   ConversationInspection,
+  DeepSeekQuota,
   IpcResult,
   Note,
   SelectionAction,
@@ -37,6 +38,8 @@ import type {
   ExcerptResult,
   SendMessageInput
 } from '../shared/api'
+import { isOfficialDeepSeek } from '../shared/types'
+import { deepSeekToday, readCodexQuota, readDeepSeekBalance } from './quota'
 import { AppDatabase } from './database'
 import { getDatabasePath, getPreload, getRendererFile, getResource, getTempDir } from './paths'
 import { WindowManager } from './windowManager'
@@ -652,6 +655,26 @@ function registerIpc(): void {
     openInspectorWindow(projectId)
   )
 
+  ipcMain.handle('todos:list', () => db.listTodos())
+  ipcMain.handle('todos:add', (_event, title: string) => db.addTodo(title))
+  ipcMain.handle('todos:update', (_event, id: string, patch: { title?: string; completed?: boolean }) =>
+    db.updateTodo(id, patch))
+  ipcMain.handle('todos:remove', (_event, id: string) => db.removeTodo(id))
+
+  ipcMain.handle('quota:deepseek', async (_event, providerId: string): Promise<DeepSeekQuota> => {
+    const provider = db.getApiProvider(providerId)
+    if (!provider || !isOfficialDeepSeek(provider)) throw new Error('请选择 DeepSeek 官方 API。')
+    const today = await deepSeekToday(getRequestLogDir(), providerId)
+    try {
+      const key = await getApiKey(providerId)
+      if (!key) throw new Error('请先在设置中配置 DeepSeek API Key。')
+      return { today, balances: await readDeepSeekBalance(key) }
+    } catch (error) {
+      return { today, balances: [], balanceError: error instanceof Error ? error.message : String(error) }
+    }
+  })
+  ipcMain.handle('quota:codex', () => readCodexQuota())
+
   ipcMain.handle('api:providers', () => listProviders())
 
   ipcMain.handle('api:connect-chatgpt', async () => {
@@ -899,8 +922,9 @@ function registerIpc(): void {
     const controller = new AbortController()
     const model = conversation.model || provider.defaultModel
     const requestId = newRequestId()
+    let excerptLog: ChatRequestLog | undefined
     try {
-      await writeRequestLog(getRequestLogDir(), {
+      excerptLog = await writeRequestLog(getRequestLogDir(), {
         requestId,
         projectId: input.projectId,
         assistantId: 'excerpt',
@@ -936,6 +960,15 @@ function registerIpc(): void {
       () => undefined,
       () => undefined
     )
+    if (excerptLog) {
+      try {
+        const file = path.join(getRequestLogDir(), requestId + '.json')
+        await fs.writeFile(file, JSON.stringify({ ...excerptLog, outcome: 'done', usage: transcript.usage,
+          answer: transcript.content }, null, 2), 'utf8')
+      } catch (error) {
+        debug(`excerpt usage log failed: ${error instanceof Error ? error.message : String(error)}`)
+      }
+    }
     const raw = transcript.content
     let content = sanitizeExcerpt(raw)
     if (!content) throw new Error('API 没有返回摘抄内容。')

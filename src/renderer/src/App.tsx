@@ -10,9 +10,6 @@ import {
   MessageSquare,
   NotebookPen,
   PanelRightClose,
-  Pin,
-  PinOff,
-  Settings,
   StickyNote,
   Upload
 } from 'lucide-react'
@@ -36,7 +33,7 @@ import { supportsWebSearch } from '../../shared/types'
 import { ChatView } from './components/ChatView'
 import { NotesView } from './components/NotesView'
 import { VocabView } from './components/VocabView'
-import { ProjectsModal } from './components/ProjectsModal'
+import { WorkspaceRail, type RailPanel } from './components/WorkspaceRail'
 import { SettingsModal } from './components/SettingsModal'
 import { NoteEditorModal } from './components/NoteEditorModal'
 import { NoteDetailModal } from './components/NoteDetailModal'
@@ -110,7 +107,7 @@ export default function App(): React.JSX.Element {
   const [composer, setComposer] = useState('')
   const [sending, setSending] = useState(false)
   const [toast, setToast] = useState<{ text: string; tone: 'info' | 'error' } | null>(null)
-  const [projectsOpen, setProjectsOpen] = useState(false)
+  const [railPanel, setRailPanel] = useState<RailPanel | null>(null)
   const [settingsOpen, setSettingsOpen] = useState(false)
   const [noteDraft, setNoteDraft] = useState<{ initial?: Partial<Note> } | null>(null)
   const [noteView, setNoteView] = useState<Note | null>(null)
@@ -331,7 +328,7 @@ export default function App(): React.JSX.Element {
     setComposer(composerRef.current)
     setPendingImage(pendingImageRef.current)
     setTab('chat')
-    setProjectsOpen(false)
+    setRailPanel(null)
   }
 
   async function performSend(
@@ -592,7 +589,7 @@ export default function App(): React.JSX.Element {
 
   async function requestDeleteProject(project: Project): Promise<void> {
     const usage = await window.margin.app.deleteProjectPreview(project.id)
-    setProjectsOpen(false)
+    setRailPanel(null)
     setDeleteRequest({ project, usage })
   }
 
@@ -639,15 +636,22 @@ export default function App(): React.JSX.Element {
 
   async function createProject(title: string, author: string): Promise<void> {
     const project = await window.margin.app.createProject({ kind: 'literature', title, author })
-    const data = await window.margin.app.activateProject(project.id)
-    applyBootstrap(data)
-    setProjectsOpen(false)
+    await switchProject(project.id)
     showToast('文献项目已创建')
   }
 
   async function deleteProject(projectId: string): Promise<void> {
     await window.margin.app.deleteProject(projectId)
-    const data = await window.margin.app.activateProject('english-reading')
+    drafts.current.delete(projectId)
+    const nextProject = activeIdRef.current === projectId ? 'english-reading' : activeIdRef.current
+    const data = await window.margin.app.activateProject(nextProject)
+    if (nextProject !== activeIdRef.current) {
+      const draft = drafts.current.get(nextProject)
+      composerRef.current = draft?.text ?? ''
+      pendingImageRef.current = draft?.image ?? null
+      setComposer(composerRef.current)
+      setPendingImage(pendingImageRef.current)
+    }
     applyBootstrap(data)
     showToast('项目及其本地对话已删除')
   }
@@ -687,10 +691,9 @@ export default function App(): React.JSX.Element {
     model?: string
   }): Promise<void> {
     try {
-      const next = await window.margin.api.setConversation({
-        projectId: activeIdRef.current,
-        ...input
-      })
+      const projectId = activeIdRef.current
+      const next = await window.margin.api.setConversation({ projectId, ...input })
+      if (activeIdRef.current !== projectId) return
       if (next) {
         setConversation(next)
         conversationRef.current = next
@@ -704,7 +707,7 @@ export default function App(): React.JSX.Element {
   function scheduleAutoHide(): void {
     if (!settingsRef.current?.autoHide || settingsRef.current.pinned) return
     if (
-      projectsOpen ||
+      railPanel ||
       settingsOpen ||
       noteDraft ||
       vocabDraft ||
@@ -776,174 +779,192 @@ export default function App(): React.JSX.Element {
       onMouseEnter={cancelAutoHide}
       onMouseLeave={scheduleAutoHide}
     >
-      <header className="app-header">
-        <div className="brand">
-          <div className="brand-mark">M</div>
-          <div className="brand-text">
-            <strong>页边</strong>
-            <span>Margin</span>
+      <WorkspaceRail
+        panel={railPanel}
+        onPanelChange={setRailPanel}
+        pinned={settings.pinned}
+        onPin={() => void window.margin.window.setPinned(!settings.pinned)}
+        onSettings={() => setSettingsOpen(true)}
+        projects={projects}
+        activeProjectId={activeProjectId}
+        onActivate={switchProject}
+        onCreate={createProject}
+        onDelete={requestDeleteProject}
+        providers={apiProviders}
+        activeProvider={activeProvider}
+      />
+      <div className="workspace-main">
+        <header className="app-header">
+          <div className="brand">
+            <div className="brand-mark">M</div>
+            <div className="brand-text">
+              <strong>页边</strong>
+              <span>Margin</span>
+            </div>
           </div>
-        </div>
-        <div className="header-actions">
+          <div className="header-actions">
+            <button className="icon-button" title="收起" onClick={() => void window.margin.window.collapse()}>
+              {windowState.side === 'top' ? <ChevronUp size={17} /> : <PanelRightClose size={17} />}
+            </button>
+          </div>
+        </header>
+
+        <div className="project-bar">
+          <div className="current-project" title={activeProject?.title}>
+            <BookOpen size={15} />
+            <span>{activeProject?.title ?? '英语阅读'}</span>
+          </div>
           <button
-            className={`icon-button ${settings.pinned ? 'active' : ''}`}
-            title={settings.pinned ? '取消固定' : '固定展开'}
-            onClick={() => void window.margin.window.setPinned(!settings.pinned)}
+            className={`status-chip ${currentStatusClass}`}
+            title={status.message}
+            onClick={() => setSettingsOpen(true)}
           >
-            {settings.pinned ? <PinOff size={16} /> : <Pin size={16} />}
+            <span className="status-dot" />
+            {currentStatusLabel}
           </button>
-          <button className="icon-button" title="设置" onClick={() => setSettingsOpen(true)}>
-            <Settings size={16} />
-          </button>
-          <button className="icon-button" title="收起" onClick={() => void window.margin.window.collapse()}>
-            {windowState.side === 'top' ? <ChevronUp size={17} /> : <PanelRightClose size={17} />}
+          {apiProviders.length > 0 && (
+            <select
+              className="model-select"
+              value={conversation ? JSON.stringify([conversation.providerId, conversation.model || activeProvider?.defaultModel || '']) : ''}
+              onChange={(event) => {
+                const [providerId, model] = JSON.parse(event.target.value) as [string, string]
+                void changeConversationApi({ providerId, model })
+              }}
+              aria-label="选择提供商和模型"
+              title={activeProvider ? `${activeProvider.name} · ${conversation?.model || '请选择模型'}` : '选择提供商和模型'}
+            >
+              {!conversation && <option value="" disabled>选择提供商和模型</option>}
+              {apiProviders.map((provider) => {
+                const currentModel = provider.id === conversation?.providerId ? conversation.model : ''
+                const models = [...new Set([currentModel, provider.defaultModel, ...provider.models].filter(Boolean))]
+                return (
+                  <optgroup key={provider.id} label={provider.name + (provider.hasKey ? '' : '（未连接）')}>
+                    {(models.length ? models : ['']).map((model) => (
+                      <option key={model} value={JSON.stringify([provider.id, model])}>
+                        {model || '未配置模型'}
+                      </option>
+                    ))}
+                  </optgroup>
+                )
+              })}
+            </select>
+          )}
+          <button
+            className="icon-button small"
+            title="查看本地真实会话与发送记录"
+            onClick={() => void openInspector()}
+          >
+            <Eye size={14} />
           </button>
         </div>
-      </header>
 
-      <div className="project-bar">
-        <button className="project-select" onClick={() => setProjectsOpen(true)}>
-          <BookOpen size={15} />
-          <span>{activeProject?.title ?? '英语阅读'}</span>
-          <ChevronDown size={13} />
-        </button>
-        <button
-          className={`status-chip ${currentStatusClass}`}
-          title={status.message}
-          onClick={() => setSettingsOpen(true)}
-        >
-          <span className="status-dot" />
-          {currentStatusLabel}
-        </button>
-        {activeProvider && activeProvider.models.length > 0 && (
-          <select
-            className="model-select"
-            value={conversation?.model || activeProvider.defaultModel}
-            onChange={(event) => void changeConversationApi({ model: event.target.value })}
-            title="选择当前对话模型"
-          >
-            {activeProvider.models.map((model) => (
-              <option key={model} value={model}>
-                {model}
-              </option>
-            ))}
-          </select>
-        )}
-        <button
-          className="icon-button small"
-          title="查看本地真实会话与发送记录"
-          onClick={() => void openInspector()}
-        >
-          <Eye size={14} />
-        </button>
+        <nav className="tabs">
+          <button className={tab === 'chat' ? 'active' : ''} onClick={() => setTab('chat')}>
+            <MessageSquare size={15} />
+            对话
+          </button>
+          <button className={tab === 'notes' ? 'active' : ''} onClick={() => setTab('notes')}>
+            <StickyNote size={15} />
+            笔记
+            {notes.length > 0 && <span className="tab-count">{notes.length}</span>}
+          </button>
+          <button className={tab === 'vocab' ? 'active' : ''} onClick={() => setTab('vocab')}>
+            <Languages size={15} />
+            生词
+            {vocab.length > 0 && <span className="tab-count">{vocab.length}</span>}
+          </button>
+        </nav>
+
+        <main className="app-main">
+          {tab === 'chat' && (
+            <ChatView
+              key={activeProjectId}
+              messages={messages}
+              messagesHasMore={messagesHasMore}
+              loadingOlder={loadingOlder}
+              onLoadOlder={loadOlderMessages}
+              sending={sending}
+              composer={composer}
+              apiReady={status.phase === 'ready'}
+              pendingImage={pendingImage}
+              onRemoveImage={() => {
+                setPendingImage(null)
+                pendingImageRef.current = null
+              }}
+              onComposerChange={setComposer}
+              onSend={requestSend}
+              canSearch={Boolean(activeProvider && supportsWebSearch(activeProvider))}
+              onStop={() => void stopGeneration()}
+              onCapture={() => void window.margin.capture.start()}
+              onSelectionHelp={() => showToast(`在任意应用中选中文字后按 ${shortcut}`)}
+              onSaveVocabAnswer={(answer, question) => saveVocabFromAnswer(answer, question)}
+              onSaveAnswer={(content) =>
+                setNoteDraft({
+                  initial: {
+                    title: '来自对话的笔记',
+                    content,
+                    source: conversation ? `${activeProvider?.name ?? 'API'} · ${conversation.model}` : '',
+                    notebook: activeProject?.kind === 'english' ? '英语阅读' : '文献笔记'
+                  }
+                })
+              }
+            />
+          )}
+          {tab === 'notes' && (
+            <NotesView
+              notes={notes}
+              folders={folders.filter((folder) => folder.kind === 'note')}
+              noteTypes={noteTypes}
+              projects={projects}
+              selectedFolder={notesFolder}
+              onSelectFolder={() => setFolderModal('note')}
+              onManageTypes={() => setTypesOpen(true)}
+              onNew={() =>
+                setNoteDraft({
+                  initial: {
+                    notebook: noteTypes[0]?.name ?? '文献笔记',
+                    noteTypeId: noteTypes[0]?.id ?? null,
+                    folderId:
+                      notesFolder !== 'all' && notesFolder !== 'uncategorized'
+                        ? notesFolder
+                        : null
+                  }
+                })
+              }
+              onOpen={(note) => setNoteView(note)}
+              onEdit={(note) => setNoteDraft({ initial: note })}
+              onMove={(note) => setMoveNote(note)}
+              onDelete={(note) => void deleteNote(note)}
+            />
+          )}
+          {tab === 'vocab' && (
+            <VocabView
+              vocab={vocab}
+              folders={folders.filter((folder) => folder.kind === 'vocab')}
+              projects={projects}
+              selectedFolder={vocabFolder}
+              onSelectFolder={() => setFolderModal('vocab')}
+              onNew={() =>
+                setVocabDraft({
+                  initial: {
+                    source: '手动添加',
+                    folderId:
+                      vocabFolder !== 'all' && vocabFolder !== 'uncategorized'
+                        ? vocabFolder
+                        : null
+                  }
+                })
+              }
+              onEdit={(item) => setVocabDraft({ initial: item })}
+              onMove={(item) => setMoveVocab(item)}
+              onReview={(item) => {
+                void window.margin.vocab.review(item.id).then(() => refreshVocab())
+              }}
+              onDelete={(item) => void deleteVocab(item)}
+            />
+          )}
+        </main>
       </div>
-
-      <nav className="tabs">
-        <button className={tab === 'chat' ? 'active' : ''} onClick={() => setTab('chat')}>
-          <MessageSquare size={15} />
-          对话
-        </button>
-        <button className={tab === 'notes' ? 'active' : ''} onClick={() => setTab('notes')}>
-          <StickyNote size={15} />
-          笔记
-          {notes.length > 0 && <span className="tab-count">{notes.length}</span>}
-        </button>
-        <button className={tab === 'vocab' ? 'active' : ''} onClick={() => setTab('vocab')}>
-          <Languages size={15} />
-          生词
-          {vocab.length > 0 && <span className="tab-count">{vocab.length}</span>}
-        </button>
-      </nav>
-
-      <main className="app-main">
-        {tab === 'chat' && (
-          <ChatView
-            key={activeProjectId}
-            messages={messages}
-            messagesHasMore={messagesHasMore}
-            loadingOlder={loadingOlder}
-            onLoadOlder={loadOlderMessages}
-            sending={sending}
-            composer={composer}
-            apiReady={status.phase === 'ready'}
-            pendingImage={pendingImage}
-            onRemoveImage={() => {
-              setPendingImage(null)
-              pendingImageRef.current = null
-            }}
-            onComposerChange={setComposer}
-            onSend={requestSend}
-            canSearch={Boolean(activeProvider && supportsWebSearch(activeProvider))}
-            onStop={() => void stopGeneration()}
-            onCapture={() => void window.margin.capture.start()}
-            onSelectionHelp={() => showToast(`在任意应用中选中文字后按 ${shortcut}`)}
-            onSaveVocabAnswer={(answer, question) => saveVocabFromAnswer(answer, question)}
-            onSaveAnswer={(content) =>
-              setNoteDraft({
-                initial: {
-                  title: '来自对话的笔记',
-                  content,
-                  source: conversation ? `${activeProvider?.name ?? 'API'} · ${conversation.model}` : '',
-                  notebook: activeProject?.kind === 'english' ? '英语阅读' : '文献笔记'
-                }
-              })
-            }
-          />
-        )}
-        {tab === 'notes' && (
-          <NotesView
-            notes={notes}
-            folders={folders.filter((folder) => folder.kind === 'note')}
-            noteTypes={noteTypes}
-            projects={projects}
-            selectedFolder={notesFolder}
-            onSelectFolder={() => setFolderModal('note')}
-            onManageTypes={() => setTypesOpen(true)}
-            onNew={() =>
-              setNoteDraft({
-                initial: {
-                  notebook: noteTypes[0]?.name ?? '文献笔记',
-                  noteTypeId: noteTypes[0]?.id ?? null,
-                  folderId:
-                    notesFolder !== 'all' && notesFolder !== 'uncategorized'
-                      ? notesFolder
-                      : null
-                }
-              })
-            }
-            onOpen={(note) => setNoteView(note)}
-            onEdit={(note) => setNoteDraft({ initial: note })}
-            onMove={(note) => setMoveNote(note)}
-            onDelete={(note) => void deleteNote(note)}
-          />
-        )}
-        {tab === 'vocab' && (
-          <VocabView
-            vocab={vocab}
-            folders={folders.filter((folder) => folder.kind === 'vocab')}
-            projects={projects}
-            selectedFolder={vocabFolder}
-            onSelectFolder={() => setFolderModal('vocab')}
-            onNew={() =>
-              setVocabDraft({
-                initial: {
-                  source: '手动添加',
-                  folderId:
-                    vocabFolder !== 'all' && vocabFolder !== 'uncategorized'
-                      ? vocabFolder
-                      : null
-                }
-              })
-            }
-            onEdit={(item) => setVocabDraft({ initial: item })}
-            onMove={(item) => setMoveVocab(item)}
-            onReview={(item) => {
-              void window.margin.vocab.review(item.id).then(() => refreshVocab())
-            }}
-            onDelete={(item) => void deleteVocab(item)}
-          />
-        )}
-      </main>
 
       {toast && <div className={`toast ${toast.tone}`}>{toast.text}</div>}
 
@@ -1043,23 +1064,6 @@ export default function App(): React.JSX.Element {
           onSave={addNoteType}
           onRemove={removeNoteType}
           onClose={() => setTypesOpen(false)}
-        />
-      )}
-      {projectsOpen && (
-        <ProjectsModal
-          projects={projects}
-          activeProjectId={activeProjectId}
-          provider={activeProvider}
-          model={conversation?.model ?? ''}
-          status={status}
-          onActivate={switchProject}
-          onCreate={createProject}
-          onDelete={requestDeleteProject}
-          onOpenSettings={() => {
-            setProjectsOpen(false)
-            setSettingsOpen(true)
-          }}
-          onClose={() => setProjectsOpen(false)}
         />
       )}
       {deleteRequest && (

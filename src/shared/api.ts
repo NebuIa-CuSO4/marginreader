@@ -5,6 +5,9 @@ import type {
   BootstrapData,
   CaptureResult,
   ConversationInspection,
+  CodexQuota,
+  DeepSeekQuota,
+  TodoItem,
   Folder,
   FolderKind,
   IpcResult,
@@ -80,6 +83,16 @@ export interface MarginApi {
     exportData: () => Promise<string | null>
     saveTextFile: (input: { fileName: string; content: string }) => Promise<string | null>
     copyText: (text: string) => Promise<void>
+  }
+  todos: {
+    list: () => Promise<TodoItem[]>
+    add: (title: string) => Promise<TodoItem>
+    update: (id: string, patch: { title?: string; completed?: boolean }) => Promise<TodoItem>
+    remove: (id: string) => Promise<void>
+  }
+  quota: {
+    deepSeek: (providerId: string) => Promise<DeepSeekQuota>
+    codex: () => Promise<CodexQuota>
   }
   excerpt: {
     run: (input: ExcerptInput) => Promise<ExcerptResult>

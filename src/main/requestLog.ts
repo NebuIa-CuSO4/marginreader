@@ -125,15 +125,20 @@ export async function writeRequestLog(
   return record
 }
 
-export async function readRequestLogs(logDir: string, limit = 50): Promise<ChatRequestLog[]> {
+export async function readRequestLogs(logDir: string, limit = 50, since?: number, before?: number): Promise<ChatRequestLog[]> {
   let entries: string[]
   try {
     entries = await fs.readdir(logDir)
   } catch {
     return []
   }
+  const earliestDate = since === undefined ? '' : new Date(since).toISOString().slice(0, 10)
+  const lastDate = before === undefined ? '9999' : new Date(before - 1).toISOString().slice(0, 10)
   const files = entries
-    .filter((entry) => entry.endsWith('.json'))
+    .filter((entry) => {
+      const date = entry.slice(0, 10)
+      return entry.endsWith('.json') && date >= earliestDate && date <= lastDate
+    })
     .sort()
     .reverse()
     .slice(0, limit)
@@ -141,7 +146,10 @@ export async function readRequestLogs(logDir: string, limit = 50): Promise<ChatR
   for (const file of files) {
     try {
       const raw = await fs.readFile(path.join(logDir, file), 'utf8')
-      logs.push(JSON.parse(raw) as ChatRequestLog)
+      const log = JSON.parse(raw) as ChatRequestLog
+      if ((since === undefined || log.createdAt >= since) && (before === undefined || log.createdAt < before)) {
+        logs.push(log)
+      }
     } catch {
       // ignore corrupt entries
     }
