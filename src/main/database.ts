@@ -30,6 +30,7 @@ const DEFAULT_SETTINGS: Settings = {
   selectionShortcut: 'CommandOrControl+Shift+E',
   autoSendSelection: true,
   autoScreenContext: true,
+  archiveRequestImages: false,
   launchAtLogin: false,
   activeProjectId: 'english-reading',
   onboardingDone: false,
@@ -722,6 +723,28 @@ export class AppDatabase {
 
   deleteMessage(id: string): void {
     this.db.prepare('DELETE FROM messages WHERE id = ?').run(id)
+  }
+
+  historyCutoff(projectId: string, before: number): number {
+    const firstKept = this.db.prepare(
+      'SELECT role FROM messages WHERE project_id = ? AND created_at >= ? ORDER BY created_at, id LIMIT 1'
+    ).get(projectId, before)
+    if (firstKept?.role !== 'assistant') return before
+    const lastQuestion = this.db.prepare(
+      "SELECT MAX(created_at) AS created_at FROM messages WHERE project_id = ? AND role = 'user' AND created_at < ?"
+    ).get(projectId, before)
+    return typeof lastQuestion?.created_at === 'number' ? lastQuestion.created_at : before
+  }
+
+  countMessagesBefore(projectId: string, before: number): number {
+    const row = this.db.prepare('SELECT COUNT(*) AS count FROM messages WHERE project_id = ? AND created_at < ?')
+      .get(projectId, before)
+    return Number(row?.count ?? 0)
+  }
+
+  deleteMessagesBefore(projectId: string, before: number): number {
+    const result = this.db.prepare('DELETE FROM messages WHERE project_id = ? AND created_at < ?').run(projectId, before)
+    return Number(result.changes)
   }
 
   clearMessages(projectId: string): void {

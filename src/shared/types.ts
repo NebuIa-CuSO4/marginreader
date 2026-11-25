@@ -187,6 +187,7 @@ export interface Settings {
   selectionShortcut: string
   autoSendSelection: boolean
   autoScreenContext: boolean
+  archiveRequestImages: boolean
   launchAtLogin: boolean
   activeProjectId: string
   onboardingDone: boolean

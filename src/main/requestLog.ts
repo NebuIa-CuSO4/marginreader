@@ -105,7 +105,7 @@ export async function writeRequestLog(
   let images = log.images
   if (images.length > 0) {
     const fileNames = await Promise.all(
-      log.images.map(async (dataUrl, index) => {
+      [...new Set(log.images)].map(async (dataUrl, index) => {
         const match = dataUrl.match(/^data:image\/([a-zA-Z0-9.+-]+);base64,([\s\S]+)$/)
         if (!match) return ''
         const ext = match[1].includes('png') ? 'png' : match[1].split('+')[0]
@@ -116,13 +116,21 @@ export async function writeRequestLog(
     )
     images = fileNames.filter((file) => file !== '')
   }
-  const record = { ...log, images } as ChatRequestLog
-  await fs.writeFile(
-    path.join(logDir, `${log.requestId}.json`),
-    JSON.stringify(record, null, 2),
-    'utf8'
-  )
+  const record = { ...log, images }
+  await saveRequestRecord(logDir, record)
   return record
+}
+
+export async function saveRequestRecord(logDir: string, record: ChatRequestLog): Promise<void> {
+  await fs.mkdir(logDir, { recursive: true })
+  const file = path.join(logDir, record.requestId + '.json')
+  const temporary = file + '.' + randomUUID() + '.tmp'
+  try {
+    await fs.writeFile(temporary, JSON.stringify(record, null, 2), 'utf8')
+    await fs.rename(temporary, file)
+  } finally {
+    await fs.rm(temporary, { force: true }).catch(() => undefined)
+  }
 }
 
 export async function readRequestLogs(logDir: string, limit = 50, since?: number, before?: number): Promise<ChatRequestLog[]> {
@@ -170,7 +178,7 @@ export function buildRequest(
   text: string,
   displayText: string,
   imageDataUrl: string,
-  screenContext: { applied: boolean; image: string },
+  screenContextApplied: boolean,
   ocrText: string,
   provider: { id: string; name: string; supportsVision: boolean },
   model: string
@@ -179,19 +187,14 @@ export function buildRequest(
   let image = imageDataUrl
   let imageOmitted = false
   let ocrApplied = false
-  if (image && !provider.supportsVision) {
-    // Text-only model: the picture itself cannot travel, so fall back to OCR text.
+  if (!provider.supportsVision) {
     if (ocrText.trim()) {
-      apiText = `${apiText}\n\n【截图文字】\n${ocrText.trim()}`
+      const label = screenContextApplied ? '屏幕上下文｜自动读取' : '截图文字'
+      apiText = `${apiText}\n\n【${label}】\n${ocrText.trim()}`
       ocrApplied = true
-    } else {
-      imageOmitted = true
     }
+    imageOmitted = Boolean(image) && !ocrApplied
     image = ''
-  } else if (image) {
-    // Vision model: send the real image only. Do not append OCR text as well,
-    // otherwise the model receives the same content twice.
-    ocrApplied = false
   }
   const messages = buildRequestMessages(projectTitle, history, apiText, image, provider.supportsVision)
   const log = {
@@ -205,7 +208,7 @@ export function buildRequest(
     supportsVision: provider.supportsVision,
     displayText,
     apiText,
-    screenContextApplied: screenContext.applied,
+    screenContextApplied,
     imageAttached: Boolean(image),
     imageOmitted,
     ocrApplied,
@@ -216,7 +219,7 @@ export function buildRequest(
       messageLimit: MAX_CONTEXT_MESSAGES
     },
     request: describeRequest(messages),
-    images: [image, screenContext.image].filter(Boolean)
+    images: [imageDataUrl].filter(Boolean)
   }
   return {
     built: {
@@ -225,7 +228,7 @@ export function buildRequest(
       imageDataUrl: image,
       imageOmitted,
       ocrApplied,
-      screenContextApplied: screenContext.applied
+      screenContextApplied
     },
     log
   }

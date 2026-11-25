@@ -144,7 +144,7 @@ export class CaptureService {
     }
   }
 
-  async captureForContext(): Promise<ScreenContext> {
+  async captureForContext(needsOcr: boolean, keepImage: boolean): Promise<ScreenContext> {
     const cursor = screen.getCursorScreenPoint()
     const display = screen.getDisplayNearestPoint(cursor)
     const scale = display.scaleFactor || 1
@@ -171,6 +171,10 @@ export class CaptureService {
       }
       const image = source.thumbnail
       const imageSize = image.getSize()
+      if (!needsOcr) {
+        return { text: '', imageDataUrl: toUploadDataUrl(image), lineCount: 0,
+          width: imageSize.width, height: imageSize.height }
+      }
 
       const tempDir = getTempDir()
       await fs.mkdir(tempDir, { recursive: true })
@@ -180,7 +184,7 @@ export class CaptureService {
         const payload = await this.recognize(filePath, this.getSettings().ocrLanguage)
         return {
           text: (payload.text ?? '').slice(0, 12000),
-          imageDataUrl: toUploadDataUrl(image),
+          imageDataUrl: keepImage && payload.text?.trim() ? toUploadDataUrl(image) : '',
           lineCount: payload.lineCount ?? 0,
           width: imageSize.width,
           height: imageSize.height,
@@ -247,8 +251,6 @@ export class CaptureService {
       const cropW = Math.max(2, Math.min(size.width - cropX, Math.round(rect.width * scaleX)))
       const cropH = Math.max(2, Math.min(size.height - cropY, Math.round(rect.height * scaleY)))
       const cropped = image.crop({ x: cropX, y: cropY, width: cropW, height: cropH })
-      // Manual screenshots now go to the web conversation as an image.
-      // No OCR text is generated or inserted into the composer.
       this.onResult({
         text: '',
         imageDataUrl: toUploadDataUrl(cropped),

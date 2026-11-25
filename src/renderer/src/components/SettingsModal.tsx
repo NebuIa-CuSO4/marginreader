@@ -13,6 +13,7 @@ import {
 import type { ApiConversation, ApiProvider, ApiStatus, Settings } from '../../../shared/types'
 import { supportsWebSearch } from '../../../shared/types'
 import { Modal } from './Modal'
+import { HistorySettings } from './HistorySettings'
 
 interface SettingsModalProps {
   settings: Settings
@@ -23,6 +24,7 @@ interface SettingsModalProps {
   onRefresh: () => Promise<void>
   onConversationChange: (input: { providerId?: string; model?: string }) => Promise<void>
   onExport: () => Promise<void>
+  onMessagesChanged: (projectId: string) => Promise<void>
   onClose: () => void
 }
 
@@ -35,6 +37,7 @@ export function SettingsModal({
   onRefresh,
   onConversationChange,
   onExport,
+  onMessagesChanged,
   onClose
 }: SettingsModalProps): React.JSX.Element {
   const [toggleShortcut, setToggleShortcut] = useState(settings.toggleShortcut)
@@ -573,6 +576,13 @@ export function SettingsModal({
             </button>
           </div>
         </section>
+        <HistorySettings
+          projectId={conversation?.projectId ?? ''}
+          projectTitle={conversation?.title ?? ''}
+          archiveImages={settings.archiveRequestImages}
+          onArchiveImages={(archiveRequestImages) => onChange({ archiveRequestImages })}
+          onMessagesChanged={onMessagesChanged}
+        />
       </div>
     </Modal>
   )

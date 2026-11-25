@@ -1103,6 +1103,12 @@ export default function App(): React.JSX.Element {
           onRefresh={refreshApiConfig}
           onConversationChange={changeConversationApi}
           onExport={exportData}
+          onMessagesChanged={async (projectId) => {
+            const page = await window.margin.chat.messages(projectId)
+            if (activeIdRef.current !== projectId || activeSends.current.has(projectId)) return
+            setMessages(page.messages)
+            setMessagesHasMore(page.hasMore)
+          }}
           onClose={() => setSettingsOpen(false)}
         />
       )}

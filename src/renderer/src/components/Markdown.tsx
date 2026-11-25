@@ -1,11 +1,11 @@
-import { isValidElement, memo, useEffect, useRef, useState } from 'react'
+import { isValidElement, memo, useState } from 'react'
 import type { ReactNode } from 'react'
 import ReactMarkdown from 'react-markdown'
 import { Check, Copy, Download } from 'lucide-react'
 import remarkGfm from 'remark-gfm'
 import remarkMath from 'remark-math'
 import rehypeKatex from 'rehype-katex'
-import renderMathInElement from 'katex/contrib/auto-render'
+import { RenderBoundary } from './RenderBoundary'
 import { normalizeMathMarkdown } from '../../../shared/markdownMath'
 
 function nodeText(node: ReactNode): string {
@@ -117,32 +117,8 @@ function MarkdownBase({
   content: string
   withCodeToolbar?: boolean
 }): React.JSX.Element {
-  const rootRef = useRef<HTMLDivElement>(null)
-
-  useEffect(() => {
-    const root = rootRef.current
-    if (!root) return
-    try {
-      renderMathInElement(root, {
-        delimiters: [
-          { left: '$$', right: '$$', display: true },
-          { left: '\\[', right: '\\]', display: true },
-          { left: '\\(', right: '\\)', display: false },
-          { left: '$', right: '$', display: false }
-        ],
-        ignoredTags: ['script', 'noscript', 'style', 'textarea', 'pre', 'code', 'option'],
-        ignoredClasses: ['katex'],
-        throwOnError: false,
-        strict: false,
-        errorColor: 'currentColor'
-      })
-    } catch {
-      // A single malformed formula must not break the rest of the answer.
-    }
-  }, [content])
-
   return (
-    <div className="markdown" ref={rootRef}>
+    <div className="markdown">
       <ReactMarkdown
         remarkPlugins={[remarkGfm, remarkMath]}
         rehypePlugins={[
@@ -169,7 +145,15 @@ function MarkdownBase({
   )
 }
 
-export const Markdown = memo(MarkdownBase)
+function SafeMarkdown({ content, withCodeToolbar }: { content: string; withCodeToolbar?: boolean }): React.JSX.Element {
+  return (
+    <RenderBoundary area="markdown" fallback={<div className="markdown markdown-fallback">{content}</div>}>
+      <MarkdownBase content={content} withCodeToolbar={withCodeToolbar} />
+    </RenderBoundary>
+  )
+}
+
+export const Markdown = memo(SafeMarkdown)
 
 /** Read-only rendering for the request inspector: no code toolbar, KaTeX enabled. */
 export const MarkdownPlain = memo(function MarkdownPlain({
@@ -177,5 +161,5 @@ export const MarkdownPlain = memo(function MarkdownPlain({
 }: {
   content: string
 }): React.JSX.Element {
-  return <MarkdownBase content={content} withCodeToolbar={false} />
+  return <SafeMarkdown content={content} withCodeToolbar={false} />
 })

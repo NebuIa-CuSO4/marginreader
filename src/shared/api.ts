@@ -72,9 +72,29 @@ export interface ApiTestResult {
   searchStatus?: SearchStatus
 }
 
+export interface HistoryFilter {
+  projectId: string
+  before: number
+  messages: boolean
+  logs: boolean
+  images: boolean
+}
+
+export interface HistoryPreview {
+  messages: number
+  logs: number
+  images: number
+  fileBytes: number
+}
+
 export interface MarginApi {
+  history: {
+    preview: (input: HistoryFilter) => Promise<HistoryPreview>
+    remove: (input: HistoryFilter) => Promise<HistoryPreview>
+  }
   app: {
     bootstrap: () => Promise<BootstrapData>
+    reportRendererError: (area: 'app' | 'markdown', name: string) => void
     activateProject: (projectId: string) => Promise<BootstrapData>
     createProject: (input: CreateProjectInput) => Promise<Project>
     deleteProject: (projectId: string) => Promise<void>

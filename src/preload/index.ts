@@ -35,7 +35,12 @@ function subscribe<T>(channel: string, callback: (payload: T) => void): () => vo
 }
 
 const api: MarginApi = {
+  history: {
+    preview: (input) => ipcRenderer.invoke('history:preview', input),
+    remove: (input) => ipcRenderer.invoke('history:remove', input)
+  },
   app: {
+    reportRendererError: (area, name) => ipcRenderer.send('app:renderer-error', area, name),
     bootstrap: () => ipcRenderer.invoke('app:bootstrap') as Promise<BootstrapData>,
     activateProject: (projectId) =>
       ipcRenderer.invoke('app:activate-project', projectId) as Promise<BootstrapData>,

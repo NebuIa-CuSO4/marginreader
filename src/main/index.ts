@@ -36,10 +36,13 @@ import type {
   CreateProjectInput,
   ExcerptInput,
   ExcerptResult,
+  HistoryFilter,
+  HistoryPreview,
   SendMessageInput
 } from '../shared/api'
 import { isOfficialDeepSeek } from '../shared/types'
 import { deepSeekToday, readCodexQuota, readDeepSeekBalance } from './quota'
+import { cleanRequestFiles } from './historyFiles'
 import { AppDatabase } from './database'
 import { getDatabasePath, getPreload, getRendererFile, getResource, getTempDir } from './paths'
 import { WindowManager } from './windowManager'
@@ -48,6 +51,7 @@ import {
   describeRequest,
   newRequestId,
   readRequestLogs,
+  saveRequestRecord,
   systemPrompt,
   writeRequestLog
 } from './requestLog'
@@ -79,6 +83,18 @@ function getRequestLogDir(): string {
 const debugFile = process.env.MARGIN_DEBUG
   ? path.join(process.cwd(), 'margin-debug.log')
   : null
+
+function recordRendererDiagnostic(event: string): void {
+  const file = path.join(app.getPath('userData'), 'renderer-errors.log')
+  try {
+    if ((fsSync.statSync(file, { throwIfNoEntry: false })?.size ?? 0) >= 65_536) {
+      fsSync.writeFileSync(file, '', 'utf8')
+    }
+    fsSync.appendFileSync(file, `${new Date().toISOString()} ${event}\n`, 'utf8')
+  } catch {
+    // Rendering recovery still works if the diagnostic log is unavailable.
+  }
+}
 
 function debug(message: string): void {
   if (!debugFile) return
@@ -317,7 +333,40 @@ async function openInspectorWindow(projectId: string): Promise<void> {
   inspectorWindow.focus()
 }
 
+let historyBusy = false
+
+async function manageHistory(input: HistoryFilter, remove = false): Promise<HistoryPreview> {
+  if (!input || typeof input.messages !== 'boolean' || typeof input.logs !== 'boolean' ||
+      typeof input.images !== 'boolean' || !Number.isSafeInteger(input.before) ||
+      input.before > Date.now() - 86_400_000 || input.before < 0 ||
+      (input.messages && !db.getProject(input.projectId))) {
+    throw new Error('清理范围无效。')
+  }
+  if (historyBusy) throw new Error('正在清理，请稍后重试。')
+  if (remove && input.messages && activeRequests.has(input.projectId)) {
+    throw new Error('请等本项目的回复完成再清理。')
+  }
+  if (remove) historyBusy = true
+  try {
+    const cutoff = input.messages ? db.historyCutoff(input.projectId, input.before) : 0
+    const messages = input.messages ? (remove ? db.deleteMessagesBefore(input.projectId, cutoff)
+      : db.countMessagesBefore(input.projectId, cutoff)) : 0
+    const files = await cleanRequestFiles(getRequestLogDir(), input, remove)
+    if (remove && inspectorWindow && !inspectorWindow.isDestroyed()) inspectorWindow.webContents.reload()
+    return { messages, ...files }
+  } finally {
+    if (remove) historyBusy = false
+  }
+}
+
 function registerIpc(): void {
+  ipcMain.handle('history:preview', (_event, input: HistoryFilter) => manageHistory(input))
+  ipcMain.handle('history:remove', (_event, input: HistoryFilter) => manageHistory(input, true))
+  ipcMain.on('app:renderer-error', (_event, area: string, name: string) => {
+    if (area !== 'app' && area !== 'markdown') return
+    const kind = typeof name === 'string' && /^[\w]{1,40}$/.test(name) ? name : 'Error'
+    recordRendererDiagnostic(`${area}: ${kind}`)
+  })
   ipcMain.handle('app:bootstrap', async () => makeBootstrap())
 
   ipcMain.handle('app:activate-project', async (_event, projectId: string) => {
@@ -447,23 +496,19 @@ function registerIpc(): void {
         }
         const displayText = input.displayText?.trim() || text
         const model = conversation.model || provider.defaultModel
-        let baseText = text
+        const settings = db.getSettings()
         let imageForRequest = input.imageDataUrl ?? ''
-        if (!imageForRequest && db.getSettings().autoScreenContext) {
-          const screen = await capture.captureForContext()
-          imageForRequest = screen.imageDataUrl ?? ''
-          if (!provider.supportsVision && screen.text.trim()) {
-            // Text-only model: screen text is all we can send.
-            baseText = `【屏幕上下文｜自动读取】\n${screen.text.trim()}\n\n【我的问题】\n${text}`
-          } else if (screen.error) {
-            debug(`auto screen context failed: ${screen.error}`)
-          }
+        let ocrText = ''
+        let screenContextApplied = false
+        if (!imageForRequest && settings.autoScreenContext) {
+          const screen = await capture.captureForContext(!provider.supportsVision, settings.archiveRequestImages)
+          imageForRequest = screen.imageDataUrl
+          ocrText = screen.text
+          screenContextApplied = Boolean(imageForRequest || ocrText)
+          if (screen.error) debug('auto screen context capture failed')
+        } else if (imageForRequest && !provider.supportsVision) {
+          ocrText = await capture.ocrDataUrl(imageForRequest)
         }
-        // Only run OCR when the model cannot take the picture itself.
-        const ocrText =
-          imageForRequest && !provider.supportsVision
-            ? await capture.ocrDataUrl(imageForRequest)
-            : ''
         const requestId = newRequestId()
         const { built, log } = buildRequest(
           input.projectId,
@@ -471,14 +516,15 @@ function registerIpc(): void {
           requestId,
           project.title,
           db.listContextMessages(input.projectId),
-          baseText,
+          text,
           displayText,
           imageForRequest,
-          { applied: provider.supportsVision && baseText !== text, image: imageForRequest },
+          screenContextApplied,
           ocrText,
           { id: provider.id, name: provider.name, supportsVision: provider.supportsVision },
           model
         )
+        if (!settings.archiveRequestImages) log.images = []
         if (built.imageOmitted) {
           await writeRequestLog(getRequestLogDir(), { ...log, error: '模型不支持图片，且 OCR 没有识别出文字' })
           return {
@@ -515,7 +561,7 @@ function registerIpc(): void {
         db.addMessage(assistantMessage)
         let content = ''
         let reasoning = ''
-        let requestLog: ChatRequestLog = { ...log }
+        let requestLog: ChatRequestLog = { ...log, images: [] }
         try {
           requestLog = await writeRequestLog(getRequestLogDir(), { ...log })
         } catch (error) {
@@ -526,8 +572,9 @@ function registerIpc(): void {
           extra: Record<string, unknown> = {}
         ): Promise<void> => {
           try {
-            await writeRequestLog(getRequestLogDir(), {
-              ...log,
+            await saveRequestRecord(getRequestLogDir(), {
+              ...requestLog,
+              searchStatus: log.searchStatus,
               logId: requestLog.requestId,
               outcome,
               answer: content,
@@ -643,7 +690,8 @@ function registerIpc(): void {
       return null
     }
     try {
-      const file = path.join(getRequestLogDir(), `${requestId}-${fileName}`)
+      if (!fileName.startsWith(requestId + '-') || !/^\d+\.(png|jpe?g|webp|gif)$/i.test(fileName.slice(requestId.length + 1))) return null
+      const file = path.join(getRequestLogDir(), fileName)
       const data = await fs.readFile(file)
       const ext = path.extname(fileName).slice(1).toLowerCase()
       return `data:image/${ext === 'jpg' ? 'jpeg' : ext};base64,${data.toString('base64')}`
@@ -903,6 +951,7 @@ function registerIpc(): void {
     if (!project) throw new Error('项目不存在。')
     const text = (input.text ?? '').trim()
     let imageDataUrl = input.imageDataUrl ?? ''
+    const originalImage = imageDataUrl
     if (!text && !imageDataUrl) throw new Error('没有可摘抄的文字或图片。')
     const { conversation, provider, apiKey } = await projectApiContext(input.projectId)
     let prompt = excerptPrompt(text, Boolean(imageDataUrl))
@@ -952,7 +1001,7 @@ function registerIpc(): void {
           messageLimit: 0
         },
         request: describeRequest(apiMessages),
-        images: imageDataUrl ? [imageDataUrl] : []
+        images: originalImage && db.getSettings().archiveRequestImages ? [originalImage] : []
       })
     } catch (error) {
       debug(`excerpt request log failed: ${error instanceof Error ? error.message : String(error)}`)
@@ -968,9 +1017,8 @@ function registerIpc(): void {
     )
     if (excerptLog) {
       try {
-        const file = path.join(getRequestLogDir(), requestId + '.json')
-        await fs.writeFile(file, JSON.stringify({ ...excerptLog, outcome: 'done', usage: transcript.usage,
-          answer: transcript.content }, null, 2), 'utf8')
+        await saveRequestRecord(getRequestLogDir(), { ...excerptLog, outcome: 'done',
+          usage: transcript.usage ?? undefined, answer: transcript.content })
       } catch (error) {
         debug(`excerpt usage log failed: ${error instanceof Error ? error.message : String(error)}`)
       }
@@ -1040,6 +1088,7 @@ function createTray(): void {
     tray.setContextMenu(
       Menu.buildFromTemplate([
         { label: '显示页边', click: () => windows.focus() },
+        { label: '重新加载界面', click: () => windows.window?.webContents.reload() },
         { label: '截图读取屏幕', click: () => void capture.start() },
         { type: 'separator' },
         { label: '退出页边', click: () => app.quit() }
@@ -1131,6 +1180,14 @@ async function bootstrap(): Promise<void> {
   registerIpc()
   const mainWindow = windows.create(settings)
   debug('main window created')
+  let recoveredRenderer = false
+  mainWindow.webContents.on('render-process-gone', (_event, details) => {
+    recordRendererDiagnostic(`renderer-${details.reason}: ${details.exitCode}`)
+    if (!isQuitting && !recoveredRenderer && !mainWindow.isDestroyed() && details.reason !== 'clean-exit') {
+      recoveredRenderer = true
+      mainWindow.webContents.reload()
+    }
+  })
   mainWindow.on('closed', () => {
     if (!isQuitting) app.quit()
   })
