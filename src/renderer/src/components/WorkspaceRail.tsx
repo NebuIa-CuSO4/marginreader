@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react'
-import { BookOpen, Check, ClipboardList, Pencil, Pin, PinOff, Plus, RefreshCw, Settings, Trash2, Wallet, X } from 'lucide-react'
+import { BookOpen, Check, ClipboardList, FileUp, Pencil, Pin, PinOff, Plus, RefreshCw, Settings, Trash2, Wallet, X } from 'lucide-react'
 import { isOfficialDeepSeek } from '../../../shared/types'
-import type { ApiProvider, CodexQuota, DeepSeekQuota, Project, QuotaWindow, TodoItem } from '../../../shared/types'
+import type { ApiProvider, CodexQuota, DeepSeekQuota, DeepSeekUsageReport, Project, QuotaWindow, TodoItem } from '../../../shared/types'
 
 export type RailPanel = 'conversations' | 'todos' | 'quota'
 
@@ -233,6 +233,69 @@ function formatDeepSeekCost({ balances, today }: DeepSeekQuota): string {
   return lower === upper ? lower : `${lower} – ${upper}`
 }
 
+function DeepSeekUsage({ providerId }: { providerId: string }): React.JSX.Element {
+  const [report, setReport] = useState<DeepSeekUsageReport | null>(null)
+  const [date, setDate] = useState('')
+  const [loading, setLoading] = useState(true)
+  const [importing, setImporting] = useState(false)
+  const [error, setError] = useState('')
+  const day = report?.days.find((item) => item.date === date) ?? report?.days[0]
+
+  useEffect(() => {
+    let alive = true
+    void window.margin.quota.deepSeekUsage(providerId).then((saved) => {
+      if (alive) setReport(saved)
+    }, () => {
+      if (alive) setError('无法读取已导入的 DeepSeek 用量。')
+    }).finally(() => {
+      if (alive) setLoading(false)
+    })
+    return () => { alive = false }
+  }, [providerId])
+
+  async function selectExport(): Promise<void> {
+    setImporting(true)
+    setError('')
+    try {
+      const result = await window.margin.quota.importDeepSeekUsage(providerId)
+      if (!result.ok) setError(result.error ?? '无法导入 DeepSeek 用量。')
+      if (result.ok && result.data) {
+        setReport(result.data)
+        setDate('')
+      }
+    } catch {
+      setError('无法导入 DeepSeek 用量，请重试。')
+    } finally {
+      setImporting(false)
+    }
+  }
+
+  return (
+    <>
+      {day && report && <label className="rail-quota-date">
+        {report.dateBasis === 'UTC' ? '统计日期（UTC）' : '统计日期'}
+        <select value={day.date} onChange={(event) => setDate(event.target.value)}>
+          {report.days.map((item) => <option key={item.date} value={item.date}>{item.date}</option>)}
+        </select>
+      </label>}
+      <dl className="rail-quota-details" aria-live="polite">
+        <div><dt>API 消费金额 · DeepSeek 官方</dt><dd>{day?.costs.length
+          ? day.costs.map(({ currency, total }) => <span key={currency}>{currency} {total}</span>) : '—'}</dd></div>
+        <div><dt>输入 Token 缓存命中率</dt><dd>{day?.cacheHitRate != null
+          ? day.cacheHitRate.toLocaleString('zh-CN', { style: 'percent', maximumFractionDigits: 2 }) : '—'}</dd></div>
+      </dl>
+      <p className="rail-empty">{report
+        ? `账户用量 · 导入于 ${new Date(report.importedAt).toLocaleString('zh-CN')}`
+        : '在官网「用量信息」导出当前账户的 ZIP 后导入。'}</p>
+      <button type="button" className="soft-button" disabled={loading || importing} onClick={() => void selectExport()}>
+        <FileUp size={14} /> {importing ? '导入中…' : '导入官方用量 ZIP'}
+      </button>
+      {error && <p className="form-error" role="alert">{error}</p>}
+      <a href="https://platform.deepseek.com/usage" target="_blank" rel="noreferrer">打开 DeepSeek 用量页</a>
+    </>
+  )
+}
+
 function QuotaPanel({ providers, activeProvider }: { providers: ApiProvider[]; activeProvider: ApiProvider | null }): React.JSX.Element {
   const deepSeekProviders = providers.filter(isOfficialDeepSeek)
   const [selected, setSelected] = useState(
@@ -297,6 +360,10 @@ function QuotaPanel({ providers, activeProvider }: { providers: ApiProvider[]; a
             <dl className="rail-quota-details" aria-live="polite">
               <div><dt>账户余额</dt><dd>{deepSeek?.balances.length ? deepSeek.balances.map(({ currency, total }) =>
                 <span key={currency}>{currency} {total}</span>) : deepSeek || error ? '不可用' : '查询中…'}</dd></div>
+            </dl>
+            {(error || deepSeek?.balanceError) && <p className="form-error" role="alert">{error || deepSeek?.balanceError}</p>}
+            <DeepSeekUsage key={selectedProvider.id} providerId={selectedProvider.id} />
+            <dl className="rail-quota-details" aria-live="polite">
               <div>
                 <dt>今日消耗金额 · Margin 估算</dt>
                 <dd>{deepSeek ? formatDeepSeekCost(deepSeek) : '—'}</dd>
@@ -307,8 +374,6 @@ function QuotaPanel({ providers, activeProvider }: { providers: ApiProvider[]; a
               {deepSeek.today.requests} 次有用量记录的请求 · 北京时间
               {deepSeek.today.unpricedRequests > 0 && ` · ${deepSeek.today.unpricedRequests} 次缺少计费信息`}
             </p>}
-            {(error || deepSeek?.balanceError) && <p className="form-error" role="alert">{error || deepSeek?.balanceError}</p>}
-            <a href="https://platform.deepseek.com/usage" target="_blank" rel="noreferrer">查看 DeepSeek 账户账单</a>
           </>
         ) : (
           <>

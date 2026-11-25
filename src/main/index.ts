@@ -24,6 +24,7 @@ import type {
   ChatRequestLog,
   ConversationInspection,
   DeepSeekQuota,
+  DeepSeekUsageReport,
   IpcResult,
   Note,
   SelectionAction,
@@ -42,6 +43,7 @@ import type {
 } from '../shared/api'
 import { isOfficialDeepSeek } from '../shared/types'
 import { deepSeekToday, readCodexQuota, readDeepSeekBalance } from './quota'
+import { DeepSeekUsageError, importDeepSeekUsage } from './deepSeekUsage'
 import { cleanRequestFiles } from './historyFiles'
 import { AppDatabase } from './database'
 import { getDatabasePath, getPreload, getRendererFile, getResource, getTempDir } from './paths'
@@ -729,6 +731,41 @@ function registerIpc(): void {
     }
   })
 
+  ipcMain.handle('quota:deepseek-usage', (_event, providerId: string): DeepSeekUsageReport | null => {
+    const provider = db.getApiProvider(providerId)
+    return provider && isOfficialDeepSeek(provider) ? db.getDeepSeekUsage(providerId) : null
+  })
+
+  ipcMain.handle('quota:import-deepseek-usage', async (event, providerId: string): Promise<IpcResult<DeepSeekUsageReport | null>> => {
+    try {
+      const provider = db.getApiProvider(providerId)
+      if (!provider || !isOfficialDeepSeek(provider)) throw new DeepSeekUsageError('请选择 DeepSeek 官方 API。')
+      const previousKey = await getApiKey(providerId)
+      const parent = BrowserWindow.fromWebContents(event.sender)
+      const options: Electron.OpenDialogOptions = {
+        title: '选择当前 DeepSeek 账户的官方用量导出',
+        filters: [{ name: 'DeepSeek 用量导出', extensions: ['zip'] }],
+        properties: ['openFile']
+      }
+      const result = parent ? await dialog.showOpenDialog(parent, options) : await dialog.showOpenDialog(options)
+      if (result.canceled || !result.filePaths[0]) return { ok: true, data: null }
+      const report = await importDeepSeekUsage(result.filePaths[0])
+      const currentKey = await getApiKey(providerId)
+      const current = db.getApiProvider(providerId)
+      if (!current || !isOfficialDeepSeek(current) || previousKey !== currentKey) {
+        throw new DeepSeekUsageError('DeepSeek API 配置已更改，请重新选择该账户的用量导出。')
+      }
+      db.saveDeepSeekUsage(providerId, report)
+      return { ok: true, data: report }
+    } catch (error) {
+      return {
+        ok: false,
+        error: error instanceof DeepSeekUsageError
+          ? error.message : '无法读取用量导出。请选择 DeepSeek 官网下载的原始 ZIP。'
+      }
+    }
+  })
+
   ipcMain.handle('api:providers', () => listProviders())
 
   ipcMain.handle('api:connect-chatgpt', async () => {
@@ -775,6 +812,7 @@ function registerIpc(): void {
         return { ...db.saveApiProvider({ ...current, supportsVision: input.supportsVision }), hasKey: await hasChatGPTSession() }
       }
       const provider = db.saveApiProvider(input.kind === 'openai-responses' ? { ...input, baseUrl: OPENAI_RESOURCE } : input)
+      if (!isOfficialDeepSeek(provider)) db.clearDeepSeekUsage(provider.id)
       const settings = db.getSettings()
       if (!settings.defaultProviderId) {
         db.updateSettings({ defaultProviderId: provider.id, defaultModel: provider.defaultModel })
@@ -820,12 +858,15 @@ function registerIpc(): void {
     if (db.getApiProvider(providerId)?.kind === 'chatgpt') throw new Error('ChatGPT 使用账号授权。')
     if (!db.getApiProvider(providerId)) throw new Error('API 配置不存在。')
     if (!String(key ?? '').trim()) throw new Error('API Key 不能为空。')
+    const previousKey = await getApiKey(providerId)
     await saveApiKey(providerId, key)
+    if (previousKey !== key.trim()) db.clearDeepSeekUsage(providerId)
     await emitApiStatus()
   })
 
   ipcMain.handle('api:clear-key', async (_event, providerId: string) => {
     await clearApiKey(providerId)
+    db.clearDeepSeekUsage(providerId)
     await emitApiStatus()
   })
 

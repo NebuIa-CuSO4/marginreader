@@ -10,6 +10,18 @@ export interface CostRange {
   max: number
 }
 
+export interface DeepSeekUsageDay {
+  date: string
+  costs: Array<{ currency: string; total: string }>
+  cacheHitRate: number | null
+}
+
+export interface DeepSeekUsageReport {
+  importedAt: number
+  dateBasis: 'export' | 'UTC'
+  days: DeepSeekUsageDay[]
+}
+
 export interface DeepSeekQuota {
   balances: Array<{ currency: string; total: string }>
   today: {

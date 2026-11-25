@@ -7,6 +7,7 @@ import type {
   ConversationInspection,
   CodexQuota,
   DeepSeekQuota,
+  DeepSeekUsageReport,
   TodoItem,
   Folder,
   FolderKind,
@@ -112,6 +113,8 @@ export interface MarginApi {
   }
   quota: {
     deepSeek: (providerId: string) => Promise<DeepSeekQuota>
+    deepSeekUsage: (providerId: string) => Promise<DeepSeekUsageReport | null>
+    importDeepSeekUsage: (providerId: string) => Promise<IpcResult<DeepSeekUsageReport | null>>
     codex: () => Promise<IpcResult<CodexQuota>>
   }
   excerpt: {

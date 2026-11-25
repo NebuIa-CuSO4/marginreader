@@ -63,6 +63,8 @@ const api: MarginApi = {
   },
   quota: {
     deepSeek: (id) => ipcRenderer.invoke('quota:deepseek', id),
+    deepSeekUsage: (id) => ipcRenderer.invoke('quota:deepseek-usage', id),
+    importDeepSeekUsage: (id) => ipcRenderer.invoke('quota:import-deepseek-usage', id),
     codex: () => ipcRenderer.invoke('quota:codex')
   },
   excerpt: {

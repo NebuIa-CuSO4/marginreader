@@ -9,7 +9,7 @@ on:
       version:
         description: Version without leading v
         required: true
-        default: 0.2.12
+        default: 0.2.13
 
 permissions:
   contents: write
@@ -37,6 +37,9 @@ jobs:
 
       - name: Markdown math regression tests
         run: npm run test:math
+
+      - name: DeepSeek usage import tests
+        run: npm run test:deepseek-usage
 
       - name: Build application
         run: npm run build

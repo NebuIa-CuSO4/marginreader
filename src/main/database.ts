@@ -7,6 +7,7 @@ import type {
   ApiUsage,
   SearchStatus,
   ChatMessage,
+  DeepSeekUsageReport,
   Folder,
   FolderKind,
   MessageStatus,
@@ -107,6 +108,11 @@ export class AppDatabase {
         updated_at INTEGER NOT NULL
       );
       CREATE INDEX IF NOT EXISTS idx_conversations_project ON conversations(project_id);
+
+      CREATE TABLE IF NOT EXISTS deepseek_usage_reports (
+        provider_id TEXT PRIMARY KEY REFERENCES api_providers(id) ON DELETE CASCADE,
+        summary TEXT NOT NULL
+      );
 
       CREATE TABLE IF NOT EXISTS messages (
         id TEXT PRIMARY KEY,
@@ -516,6 +522,23 @@ export class AppDatabase {
 
   deleteApiProvider(id: string): void {
     this.db.prepare('DELETE FROM api_providers WHERE id = ?').run(id)
+  }
+
+  getDeepSeekUsage(providerId: string): DeepSeekUsageReport | null {
+    const row = this.db.prepare('SELECT summary FROM deepseek_usage_reports WHERE provider_id = ?')
+      .get(providerId) as { summary: string } | undefined
+    return parseJson(row?.summary, null)
+  }
+
+  saveDeepSeekUsage(providerId: string, report: DeepSeekUsageReport): void {
+    this.db.prepare(`
+      INSERT INTO deepseek_usage_reports (provider_id, summary) VALUES (?, ?)
+      ON CONFLICT(provider_id) DO UPDATE SET summary = excluded.summary
+    `).run(providerId, JSON.stringify(report))
+  }
+
+  clearDeepSeekUsage(providerId: string): void {
+    this.db.prepare('DELETE FROM deepseek_usage_reports WHERE provider_id = ?').run(providerId)
   }
 
   ensureConversation(project: Project, source: ApiConversation['source'] = 'api'): ApiConversation {

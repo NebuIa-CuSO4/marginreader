@@ -318,6 +318,14 @@ button:disabled {
   text-decoration: underline;
 }
 
+.rail-quota-date {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  color: var(--muted);
+  font-size: 11px;
+}
+
 .rail-quota-details {
   display: grid;
   gap: 7px;
